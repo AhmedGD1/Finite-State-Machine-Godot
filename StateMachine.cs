@@ -7,10 +7,9 @@ using System.Linq;
 public partial class StateMachine : Node
 {
    /* --------------------------------------------------------
-   *  ENUMS & EVENTS
+   *  ENUMS
    * -------------------------------------------------------- */
    public enum ProcessType { Process, PhysicsProcess }
-   public event Action<Enum, Enum> TransitionTriggered;
 
    /* --------------------------------------------------------
    *  FIELDS
