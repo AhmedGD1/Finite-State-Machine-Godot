@@ -1,5 +1,4 @@
 ## Made By Ahmed GD
-@icon("res://Components/IconGodotNode/node/icon_brain.png")
 class_name StateMachine extends Node
 
 enum ProcessType{
