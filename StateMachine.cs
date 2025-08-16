@@ -50,15 +50,7 @@ public partial class StateMachine : Node
       if (states.ContainsKey(id))
          return null;
 
-      State state = new State
-      {
-         Id = id,
-         Update = update,
-         Enter = enter,
-         Exit = exit,
-         MinTime = minTime,
-         Timeout = timeout
-      };
+      State state = new State(id, update, enter, exit, minTime, timeout);
 
       states[id] = state;
 
@@ -398,6 +390,16 @@ public partial class StateMachine : Node
       public void SetRestartId(Enum value) => RestartId = value;
       public void SetProcessType(ProcessType type) => processType = type;
       public bool IsLocked() => Locked;
+
+      public State(Enum id, Action<double> update, Action enter, Action exit, float minTime, float timeout)
+      {
+         Id = id;
+         Update = update;
+         Enter = enter;
+         Exit = exit;
+         MinTime = minTime;
+         Timeout = timeout;
+      }
    }
 
    public class Transition
