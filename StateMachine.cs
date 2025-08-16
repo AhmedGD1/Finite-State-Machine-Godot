@@ -1,7 +1,7 @@
 using Godot;
 using System;
-using System.Collections.Generic;
 using System.Linq;
+using System.Collections.Generic;
 
 [GlobalClass]
 public partial class StateMachine : Node
@@ -11,7 +11,12 @@ public partial class StateMachine : Node
    * -------------------------------------------------------- */
    public enum ProcessType { Process, PhysicsProcess }
 
-   [Signal] public delegate void StateChangedEventHandler(int from, int to);
+   /* How to use -> OnStateChanged(int from, int to) {
+      (States)from = from;
+      (States)to = to;
+   }*/
+   public event Action<int, int> StateChanged;
+   public event Action<string, string> TransitionTriggered;
 
    /* --------------------------------------------------------
    *  FIELDS
@@ -20,7 +25,6 @@ public partial class StateMachine : Node
    private Dictionary<Enum, List<Transition>> transitions = new();
    private Dictionary<string, bool> signalConditions = new();
    private List<Transition> globalTransitions = new();
-   private List<(Godot.GodotObject owner, string name, Callable callable)> connectedSignals = new();
 
    private State currentState;
    private Enum currentId;
@@ -38,9 +42,6 @@ public partial class StateMachine : Node
 
    public override void _PhysicsProcess(double delta) =>
       ProcessState(ProcessType.PhysicsProcess, delta);
-
-   public override void _ExitTree() =>
-      DisconnectAllSignals();
 
    /* --------------------------------------------------------
    *  STATE MANAGEMENT
@@ -146,7 +147,7 @@ public partial class StateMachine : Node
       if (!ignoreExit)
          currentState?.Exit?.Invoke();
 
-      EmitSignal(SignalName.StateChanged, EnumToInt(currentId), EnumToInt(id));
+      StateChanged.Invoke(EnumToInt(currentId), EnumToInt(id));
 
       ResetStateTime();
       previousId = currentId;
@@ -219,56 +220,10 @@ public partial class StateMachine : Node
          transitions.Remove(from);
    }
 
+   private static int EnumToInt(Enum value) => Convert.ToInt32(value);
+
    public void CleanTransitions() => transitions.Clear();
    public void CleanGlobalTransitions() => globalTransitions.Clear();
-
-   /* --------------------------------------------------------
-   *  SIGNAL MANAGEMENT
-   * -------------------------------------------------------- */
-   public Transition AddSignalTransition(Enum from, Enum to, Node source, string signalName, float overrideMinTime = -1f)
-   {
-      Predicate<StateMachine> condition = CreateConditionFromSignal(source, signalName);
-      return AddTransition(from, to, condition, overrideMinTime);
-   }
-
-   public Transition AddGlobalSignalTransition(Enum to, Node source, string signalName, float overrideMinTime = -1f)
-   {
-      Predicate<StateMachine> condition = CreateConditionFromSignal(source, signalName);
-      return AddGlobalTransition(to, condition, overrideMinTime);
-   }
-
-   private Predicate<StateMachine> CreateConditionFromSignal(Node source, string signalName)
-   {
-      string key = $"{source.GetInstanceId()}_{signalName}";
-      signalConditions[key] = false;
-
-      Callable OnSignalInternal = Callable.From(() => { signalConditions[key] = true; });
-
-      source.Connect(signalName, OnSignalInternal);
-      connectedSignals.Add((source, signalName, OnSignalInternal));
-
-      return sm =>
-      {
-         if (signalConditions.TryGetValue(key, out bool result) && result)
-         {
-            signalConditions[key] = false; // reset so it's only valid for 1 check
-            return true;
-         }
-         return false;
-      };
-   }
-
-   public void DisconnectAllSignals()
-   {
-      foreach ((Godot.GodotObject owner, string name, Callable callable) in connectedSignals)
-         if (IsInstanceValid(owner) && owner.IsConnected(name, callable))
-            owner.Disconnect(name, callable);
-
-      connectedSignals.Clear();
-      signalConditions.Clear();
-   }
-
-   private static int EnumToInt(Enum value) => Convert.ToInt32(value);
 
    /* --------------------------------------------------------
    *  PROCESSING
@@ -313,6 +268,7 @@ public partial class StateMachine : Node
          if (timeRequirementMet && (transition.Condition?.Invoke(this) ?? true))
          {
             ChangeStateInternal(transition.To);
+            TransitionTriggered.Invoke(transition.From.ToString() ?? "Any", transition.To.ToString());
             return;
          }
       }
@@ -442,7 +398,3 @@ public partial class StateMachine : Node
       }
    }
 }
-
-
-
-
