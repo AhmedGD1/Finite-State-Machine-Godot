@@ -7,9 +7,11 @@ using System.Linq;
 public partial class StateMachine : Node
 {
    /* --------------------------------------------------------
-   *  ENUMS
+   *  ENUMS & Events;
    * -------------------------------------------------------- */
    public enum ProcessType { Process, PhysicsProcess }
+
+   [Signal] public delegate void StateChangedEventHandler(int from, int to);
 
    /* --------------------------------------------------------
    *  FIELDS
@@ -63,9 +65,7 @@ public partial class StateMachine : Node
       if (initialId == null)
       {
          initialId = id;
-         currentId = id;
-         currentState = states[id];
-         ChangeStateInternal(initialId, true);
+         ChangeStateInternal(id, ignoreExit: true);
       }
 
       state.SetRestartId(initialId);
@@ -154,6 +154,8 @@ public partial class StateMachine : Node
       if (!ignoreExit)
          currentState?.Exit?.Invoke();
 
+      EmitSignal(SignalName.StateChanged, EnumToInt(currentId), EnumToInt(id));
+
       ResetStateTime();
       previousId = currentId;
       currentId = id;
@@ -173,14 +175,10 @@ public partial class StateMachine : Node
       if (!transitions.ContainsKey(fromId))
          transitions[fromId] = new List<Transition>();
 
-      Transition transition = new Transition
-      {
-         From = fromId,
-         To = toId,
-         Condition = condition,
-         OverrideMinTime = overrideMinTime
-      };
+      Transition transition = new Transition(fromId, toId, condition, overrideMinTime);
+
       transitions[fromId].Add(transition);
+      transitions[fromId].Sort(Transition.Compare);
 
       return transition;
    }
@@ -190,14 +188,10 @@ public partial class StateMachine : Node
       if (!states.ContainsKey(toId))
          return null;
 
-      Transition transition = new Transition
-      {
-         From = null,
-         To = toId,
-         Condition = condition,
-         OverrideMinTime = overrideMinTime
-      };
+      Transition transition = new Transition(null, toId, condition, overrideMinTime);
+
       globalTransitions.Add(transition);
+      globalTransitions.Sort(Transition.Compare);
 
       return transition;
    }
@@ -215,7 +209,7 @@ public partial class StateMachine : Node
 
       if (transitions.ContainsKey(from))
          if (transitions[from].Count == originalCount)
-               GD.PushError($"No Transition Was Found Between: {from} -> {to}");
+            GD.PushError($"No Transition Was Found Between: {from} -> {to}");
    }
 
    public void RemoveGlobalTransition(Enum to)
@@ -239,46 +233,50 @@ public partial class StateMachine : Node
    /* --------------------------------------------------------
    *  SIGNAL MANAGEMENT
    * -------------------------------------------------------- */
-   public Transition AddSignalTransition(Enum from, Enum to, Signal signal, float overrideMinTime = -1f)
+   public Transition AddSignalTransition(Enum from, Enum to, Node source, string signalName, float overrideMinTime = -1f)
    {
-      Predicate<StateMachine> condition = CreateConditionFromSignal(signal);
+      Predicate<StateMachine> condition = CreateConditionFromSignal(source, signalName);
       return AddTransition(from, to, condition, overrideMinTime);
    }
 
-   public Transition AddGlobalSignalTransition(Enum to, Signal signal, float overrideMinTime = -1f)
+   public Transition AddGlobalSignalTransition(Enum to, Node source, string signalName, float overrideMinTime = -1f)
    {
-      Predicate<StateMachine> condition = CreateConditionFromSignal(signal);
+      Predicate<StateMachine> condition = CreateConditionFromSignal(source, signalName);
       return AddGlobalTransition(to, condition, overrideMinTime);
    }
 
-   private Predicate<StateMachine> CreateConditionFromSignal(Signal signal)
+   private Predicate<StateMachine> CreateConditionFromSignal(Node source, string signalName)
    {
-      string key = $"{signal.Owner.GetInstanceId()}_{signal.Name}_{signal.GetHashCode()}";
+      string key = $"{source.GetInstanceId()}_{signalName}";
       signalConditions[key] = false;
 
       Callable OnSignalInternal = Callable.From(() => { signalConditions[key] = true; });
 
-      signal.Owner.Connect(signal.Name, OnSignalInternal);
-      connectedSignals.Add((signal.Owner, signal.Name, OnSignalInternal));
+      source.Connect(signalName, OnSignalInternal);
+      connectedSignals.Add((source, signalName, OnSignalInternal));
 
-      return sm => signalConditions.TryGetValue(key, out bool result) && result;
-   }
-
-   private void ResetSignalConditions()
-   {
-      foreach (string key in signalConditions.Keys)
-         if (signalConditions[key])
-               signalConditions[key] = false;
+      return sm =>
+      {
+         if (signalConditions.TryGetValue(key, out bool result) && result)
+         {
+            signalConditions[key] = false; // reset so it's only valid for 1 check
+            return true;
+         }
+         return false;
+      };
    }
 
    public void DisconnectAllSignals()
    {
       foreach ((Godot.GodotObject owner, string name, Callable callable) in connectedSignals)
-         if (IsInstanceValid(owner))
-               owner.Disconnect(name, callable);
+         if (IsInstanceValid(owner) && owner.IsConnected(name, callable))
+            owner.Disconnect(name, callable);
 
       connectedSignals.Clear();
+      signalConditions.Clear();
    }
+
+   private static int EnumToInt(Enum value) => Convert.ToInt32(value);
 
    /* --------------------------------------------------------
    *  PROCESSING
@@ -293,7 +291,6 @@ public partial class StateMachine : Node
          stateTime += (float)delta;
          currentState.Update?.Invoke(delta);
          CheckTransitions();
-         ResetSignalConditions();
       }
    }
 
@@ -313,20 +310,18 @@ public partial class StateMachine : Node
 
    private void CheckTransitionsLoop(List<Transition> currentTransitions)
    {
-      currentTransitions.Sort((a, b) => b.Priority.CompareTo(a.Priority));
-
       foreach (Transition transition in currentTransitions)
       {
          if (currentState.IsLocked())
-               break;
+            break;
 
          float requiredTime = transition.OverrideMinTime > 0f ? transition.OverrideMinTime : currentState.MinTime;
          bool timeRequirementMet = transition.ForceInstantTransition || stateTime >= requiredTime;
 
          if (timeRequirementMet && (transition.Condition?.Invoke(this) ?? true))
          {
-               ChangeStateInternal(transition.To);
-               return;
+            ChangeStateInternal(transition.To);
+            return;
          }
       }
    }
@@ -335,6 +330,7 @@ public partial class StateMachine : Node
    *  PAUSE / RESUME
    * -------------------------------------------------------- */
    public void Pause() => paused = true;
+   public bool IsPaused() => paused;
 
    public void Resume(bool resetTime = false)
    {
@@ -361,8 +357,8 @@ public partial class StateMachine : Node
 
    public bool HasStateId(Enum id) => states.ContainsKey(id);
 
-   public bool IsCurrentStateId(Enum id) => Equals(currentState.Id, id);
-   public bool IsPreviousStateId(Enum id) => Equals(previousId, id);
+   public bool IsInState(Enum id) => Equals(currentState.Id, id);
+   public bool IsPreviousState(Enum id) => Equals(previousId, id);
 
    public Enum GetPreviousStateId() => previousId;
 
@@ -373,7 +369,7 @@ public partial class StateMachine : Node
       var result = new List<string>();
       foreach (var kvp in transitions)
          foreach (var t in kvp.Value)
-               result.Add($"{t.From} -> {t.To} (Priority: {t.Priority})");
+            result.Add($"{t.From} -> {t.To} (Priority: {t.Priority})");
 
       foreach (var t in globalTransitions)
          result.Add($"GLOBAL -> {t.To} (Priority: {t.Priority})");
@@ -406,12 +402,14 @@ public partial class StateMachine : Node
 
    public class Transition
    {
+      private static int nextIndex = 0;
       public Enum From;
       public Enum To;
       public float OverrideMinTime = -1f;
       public Predicate<StateMachine> Condition;
       public bool ForceInstantTransition;
       public int Priority;
+      public int InsertionIndex { get; private set; }
 
       public void ForceInstant() => ForceInstantTransition = true;
 
@@ -419,10 +417,30 @@ public partial class StateMachine : Node
       {
          if (value < 0)
          {
-               GD.PushError("Priority Should be greater than zero");
-               return;
+            GD.PushError("Priority Should be greater than zero");
+            return;
          }
          Priority = value;
       }
+
+      public Transition(Enum from, Enum to, Predicate<StateMachine> condition, float minTime = -1)
+      {
+         From = from;
+         To = to;
+         Condition = condition;
+         OverrideMinTime = minTime;
+
+         InsertionIndex = nextIndex++;
+      }
+
+      internal static int Compare(Transition a, Transition b)
+      {
+         int priorityCompare = b.Priority.CompareTo(a.Priority);
+         return priorityCompare != 0 ? priorityCompare : a.InsertionIndex.CompareTo(b.InsertionIndex);
+      }
    }
 }
+
+
+
+
