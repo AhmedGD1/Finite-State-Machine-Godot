@@ -2,6 +2,7 @@ using Godot;
 using System;
 using System.Linq;
 using System.Collections.Generic;
+using System.Threading;
 
 public class StateMachine<T> where T : Enum
 {
@@ -97,8 +98,11 @@ public class StateMachine<T> where T : Enum
    {
       ResetStateTime();
 
-      if (!ignoreExit) currentState?.Exit?.Invoke();
-      if (!ignoreEnter) currentState?.Enter?.Invoke();
+      if (currentState == null)
+         return;
+
+      if (!ignoreExit && !currentState.IsLocked()) currentState.Exit?.Invoke();
+      if (!ignoreEnter) currentState.Enter?.Invoke();
    }
 
    public State GetState(T id)
@@ -118,7 +122,7 @@ public class StateMachine<T> where T : Enum
 
    public bool ForceChangeState(T id)
    {
-      if (!states.ContainsKey(id))
+      if (!states.ContainsKey(id) || currentState.IsLocked())
          return false;
 
       ChangeStateInternal(id);
@@ -127,9 +131,9 @@ public class StateMachine<T> where T : Enum
 
    public void GoBack()
    {
-      if (!states.ContainsKey(previousId))
+      if (!states.ContainsKey(previousId) || currentState.IsLocked())
       {
-         GD.PushError($"There is no previous state to go back to. Current State Id: {currentId}");
+         GD.PushError($"There is no previous state to go back to Or current state is locked. Current State Id: {currentId}");
          return;
       }
 
@@ -138,7 +142,7 @@ public class StateMachine<T> where T : Enum
 
    public bool GoBackIfPossible()
    {
-      if (!states.ContainsKey(previousId))
+      if (!states.ContainsKey(previousId) || currentState.IsLocked())
          return false;
 
       ChangeStateInternal(previousId);
@@ -150,13 +154,13 @@ public class StateMachine<T> where T : Enum
       if (!states.ContainsKey(id))
          return;
 
-      if (!ignoreExit)
-         currentState?.Exit?.Invoke();
+      if (!ignoreExit && !currentState.IsLocked())
+         currentState.Exit?.Invoke();
 
       if (hasInitialId)
          StateChanged?.Invoke(currentId, id);
 
-      ResetStateTime();
+      stateTime = 0f;
       previousId = currentId;
       currentId = id;
       currentState = states[id];
@@ -250,12 +254,15 @@ public class StateMachine<T> where T : Enum
 
       try
       {
-         if (currentState.Timeout > 0f && stateTime >= currentState.Timeout)
+         bool timeoutTriggered = currentState.Timeout > 0f && stateTime >= currentState.Timeout;
+         
+         if (timeoutTriggered)
          {
             ChangeStateInternal(currentState.RestartId);
+            TransitionTriggered?.Invoke(currentId, currentState.RestartId);
             return;
          }
-
+         
          if (transitions.TryGetValue(currentId, out var currentTransitions))
             evaluator.CandidateTransitions.AddRange(currentTransitions);
 
@@ -272,11 +279,11 @@ public class StateMachine<T> where T : Enum
 
    private void CheckTransitionsLoop(List<Transition> currentTransitions)
    {
+      if (currentState.IsLocked())
+         return;
+         
       foreach (Transition transition in currentTransitions)
       {
-         if (currentState.IsLocked())
-            break;
-
          float requiredTime = transition.OverrideMinTime > 0f ? transition.OverrideMinTime : currentState.MinTime;
          bool timeRequirementMet = transition.ForceInstantTransition || stateTime >= requiredTime;
 
