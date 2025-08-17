@@ -3,61 +3,52 @@ using System;
 using System.Linq;
 using System.Collections.Generic;
 
-[GlobalClass]
-public partial class StateMachine : Node
+public class StateMachine<T> where T : Enum
 {
    /* --------------------------------------------------------
-   *  ENUMS & Events;
+   *  TS & Events;
    * -------------------------------------------------------- */
-   public enum ProcessType { Process, PhysicsProcess }
+   public enum ProcessType { PhysicsProcess, Process }
 
    /* How to use -> OnStateChanged(int from, int to) {
       (States)from = from;
       (States)to = to;
    }*/
-   public event Action<int, int> StateChanged;
-   public event Action<string, string> TransitionTriggered;
+   public event Action<T, T> StateChanged;
+   public event Action<T, T> TransitionTriggered;
 
    /* --------------------------------------------------------
    *  FIELDS
    * -------------------------------------------------------- */
-   private Dictionary<Enum, State> states = new();
-   private Dictionary<Enum, List<Transition>> transitions = new();
-   private Dictionary<string, bool> signalConditions = new();
+   private Dictionary<T, State> states = new();
+   private Dictionary<T, List<Transition>> transitions = new();
    private List<Transition> globalTransitions = new();
 
    private State currentState;
-   private Enum currentId;
-   private Enum previousId;
-   private Enum initialId;
+   private T currentId;
+   private T previousId;
+   private T initialId;
 
+   private bool hasInitialId;
    private bool paused;
    private float stateTime;
 
    /* --------------------------------------------------------
-   *  GODOT LIFECYCLE
-   * -------------------------------------------------------- */
-   public override void _Process(double delta) =>
-      ProcessState(ProcessType.Process, delta);
-
-   public override void _PhysicsProcess(double delta) =>
-      ProcessState(ProcessType.PhysicsProcess, delta);
-
-   /* --------------------------------------------------------
    *  STATE MANAGEMENT
    * -------------------------------------------------------- */
-   public State AddState(Enum id, Action<double> update = null, Action enter = null, Action exit = null, float minTime = 0f, float timeout = -1f)
+   public State AddState(T id, Action<double> update = null, Action enter = null, Action exit = null, float minTime = default, float timeout = -1, ProcessType processType = default)
    {
       if (states.ContainsKey(id))
          return null;
 
-      State state = new State(id, update, enter, exit, minTime, timeout);
+      State state = new State(id, update, enter, exit, minTime, timeout, processType);
 
       states[id] = state;
 
-      if (initialId == null)
+      if (!hasInitialId)
       {
          initialId = id;
+         hasInitialId = true;
          ChangeStateInternal(id, ignoreExit: true);
       }
 
@@ -65,20 +56,23 @@ public partial class StateMachine : Node
       return state;
    }
 
-   public void RemoveState(Enum id)
+   public void RemoveState(T id)
    {
       if (!states.ContainsKey(id))
          return;
 
       states.Remove(id);
 
-      if (currentId == id)
-         Reset();
+      if (initialId.Equals(id))
+         hasInitialId = false;
+
+      if (currentId.Equals(id))
+            Reset();
 
       foreach (var key in transitions.Keys.ToList())
-         transitions[key] = transitions[key].Where(t => t.To != id && t.From != id).ToList();
+         transitions[key] = transitions[key].Where(t => !t.To.Equals(id) && !t.From.Equals(id)).ToList();
 
-      globalTransitions = globalTransitions.Where(t => t.To != id).ToList();
+      globalTransitions = globalTransitions.Where(t => !t.To.Equals(id)).ToList();
    }
 
    public void Reset()
@@ -86,8 +80,17 @@ public partial class StateMachine : Node
       if (states.Count == 0)
          return;
 
+      if (!hasInitialId)
+         SetInitialId(states.Values.First().Id);
+
       ChangeStateInternal(initialId);
-      previousId = null;
+      previousId = default;
+   }
+
+   public void SetInitialId(T id)
+   {
+      initialId = id;
+      hasInitialId = true;
    }
 
    public void RestartCurrentState(bool ignoreExit = false, bool ignoreEnter = false)
@@ -98,7 +101,7 @@ public partial class StateMachine : Node
       if (!ignoreEnter) currentState?.Enter?.Invoke();
    }
 
-   public State GetState(Enum id)
+   public State GetState(T id)
    {
       states.TryGetValue(id, out var state);
       return state;
@@ -107,13 +110,13 @@ public partial class StateMachine : Node
    /* --------------------------------------------------------
    *  STATE CHANGING
    * -------------------------------------------------------- */
-   public void ChangeState(Enum id, bool condition)
+   public void TryChangeState(T id, bool condition)
    {
       if (condition && states.ContainsKey(id))
          ChangeStateInternal(id);
    }
 
-   public bool ForceChangeState(Enum id)
+   public bool ForceChangeState(T id)
    {
       if (!states.ContainsKey(id))
          return false;
@@ -124,22 +127,25 @@ public partial class StateMachine : Node
 
    public void GoBack()
    {
-      if (previousId == null)
+      if (!states.ContainsKey(previousId))
+      {
+         GD.PushError($"There is no previous state to go back to. Current State Id: {currentId}");
          return;
+      }
 
       ChangeStateInternal(previousId);
    }
 
    public bool GoBackIfPossible()
    {
-      if (previousId == null || !states.ContainsKey(previousId))
+      if (!states.ContainsKey(previousId))
          return false;
 
       ChangeStateInternal(previousId);
       return true;
    }
 
-   private void ChangeStateInternal(Enum id, bool ignoreExit = false)
+   private void ChangeStateInternal(T id, bool ignoreExit = false)
    {
       if (!states.ContainsKey(id))
          return;
@@ -147,7 +153,8 @@ public partial class StateMachine : Node
       if (!ignoreExit)
          currentState?.Exit?.Invoke();
 
-      StateChanged.Invoke(EnumToInt(currentId), EnumToInt(id));
+      if (hasInitialId)
+         StateChanged?.Invoke(currentId, id);
 
       ResetStateTime();
       previousId = currentId;
@@ -160,7 +167,7 @@ public partial class StateMachine : Node
    /* --------------------------------------------------------
    *  TRANSITION MANAGEMENT
    * -------------------------------------------------------- */
-   public Transition AddTransition(Enum fromId, Enum toId, Predicate<StateMachine> condition, float overrideMinTime = -1f)
+   public Transition AddTransition(T fromId, T toId, Predicate<StateMachine<T>> condition, float overrideMinTime = default)
    {
       if (!states.ContainsKey(toId))
          return null;
@@ -171,31 +178,29 @@ public partial class StateMachine : Node
       Transition transition = new Transition(fromId, toId, condition, overrideMinTime);
 
       transitions[fromId].Add(transition);
-      transitions[fromId].Sort(Transition.Compare);
 
       return transition;
    }
 
-   public Transition AddGlobalTransition(Enum toId, Predicate<StateMachine> condition, float overrideMinTime = -1f)
+   public Transition AddGlobalTransition(T toId, Predicate<StateMachine<T>> condition, float overrideMinTime = default)
    {
       if (!states.ContainsKey(toId))
          return null;
 
-      Transition transition = new Transition(null, toId, condition, overrideMinTime);
+      Transition transition = new Transition(default, toId, condition, overrideMinTime);
 
       globalTransitions.Add(transition);
-      globalTransitions.Sort(Transition.Compare);
 
       return transition;
    }
 
-   public void RemoveTransition(Enum from, Enum to)
+   public void RemoveTransition(T from, T to)
    {
       if (!states.ContainsKey(from))
          return;
 
       int originalCount = transitions[from].Count;
-      transitions[from] = transitions[from].Where(t => t.To != to).ToList();
+      transitions[from] = transitions[from].Where(t => !t.To.Equals(to)).ToList();
 
       if (transitions[from].Count == 0)
          transitions.Remove(from);
@@ -205,22 +210,20 @@ public partial class StateMachine : Node
             GD.PushError($"No Transition Was Found Between: {from} -> {to}");
    }
 
-   public void RemoveGlobalTransition(Enum to)
+   public void RemoveGlobalTransition(T to)
    {
       int originalCount = globalTransitions.Count;
-      globalTransitions = globalTransitions.Where(t => t.To != to).ToList();
+      globalTransitions = globalTransitions.Where(t => !t.To.Equals(to)).ToList();
 
       if (globalTransitions.Count == originalCount)
          GD.PushError($"No Global Transition Was Found Between: {currentId} -> {to}");
    }
 
-   public void CleanTransitionsFromState(Enum from)
+   public void CleanTransitionsFromState(T from)
    {
       if (transitions.ContainsKey(from))
          transitions.Remove(from);
    }
-
-   private static int EnumToInt(Enum value) => Convert.ToInt32(value);
 
    public void CleanTransitions() => transitions.Clear();
    public void CleanGlobalTransitions() => globalTransitions.Clear();
@@ -228,7 +231,7 @@ public partial class StateMachine : Node
    /* --------------------------------------------------------
    *  PROCESSING
    * -------------------------------------------------------- */
-   private void ProcessState(ProcessType processType, double delta)
+   public void Update(ProcessType processType, double delta)
    {
       if (paused || currentState == null)
          return;
@@ -243,16 +246,28 @@ public partial class StateMachine : Node
 
    private void CheckTransitions()
    {
-      if (currentState.Timeout > 0f && stateTime >= currentState.Timeout)
+      var evaluator = TransitionPool.Get();
+
+      try
       {
-         ChangeStateInternal(currentState.RestartId);
-         return;
+         if (currentState.Timeout > 0f && stateTime >= currentState.Timeout)
+         {
+            ChangeStateInternal(currentState.RestartId);
+            return;
+         }
+
+         if (transitions.TryGetValue(currentId, out var currentTransitions))
+            evaluator.CandidateTransitions.AddRange(currentTransitions);
+
+         evaluator.CandidateTransitions.AddRange(globalTransitions);
+         evaluator.CandidateTransitions.Sort(Transition.Compare);
+
+         CheckTransitionsLoop(evaluator.CandidateTransitions);
       }
-
-      if (transitions.TryGetValue(currentId, out var currentTransitions))
-         CheckTransitionsLoop(currentTransitions);
-
-      CheckTransitionsLoop(globalTransitions);
+      finally
+      {
+         TransitionPool.Return(evaluator);
+      }
    }
 
    private void CheckTransitionsLoop(List<Transition> currentTransitions)
@@ -268,7 +283,7 @@ public partial class StateMachine : Node
          if (timeRequirementMet && (transition.Condition?.Invoke(this) ?? true))
          {
             ChangeStateInternal(transition.To);
-            TransitionTriggered.Invoke(transition.From.ToString() ?? "Any", transition.To.ToString());
+            TransitionTriggered?.Invoke(transition.From, transition.To);
             return;
          }
       }
@@ -292,23 +307,30 @@ public partial class StateMachine : Node
    /* --------------------------------------------------------
    *  GETTERS / DEBUG
    * -------------------------------------------------------- */
-   public Enum GetCurrentStateId() => currentState.Id;
-   public Enum GetInitialStateId() => initialId;
+   public T GetCurrentStateId() => currentState != null ? currentState.Id : default;
+   public T GetInitialStateId() => initialId;
    public float GetStateTime() => stateTime;
-   public float GetMinStateTime() => currentState.MinTime;
+   public float GetMinStateTime() => currentState?.MinTime ?? 0f;
 
-   public bool HasTransition(Enum from, Enum to) =>
-      transitions.ContainsKey(from) && transitions[from].Any(t => t.To == to);
+   public float GetRemainingTime() =>
+      currentState?.Timeout > 0 ? Mathf.Max(0, currentState.Timeout - stateTime) : -1f;
 
-   public bool HasGlobalTransition(Enum to) =>
-      globalTransitions.Any(t => t.To == to);
+   public bool HasTransition(T from, T to) =>
+      transitions.ContainsKey(from) && transitions[from].Any(t => t.To.Equals(to));
 
-   public bool HasStateId(Enum id) => states.ContainsKey(id);
+   public bool HasAnyTransitionFrom(T id) =>
+      transitions.ContainsKey(id) && transitions[id].Count > 0;
 
-   public bool IsInState(Enum id) => Equals(currentState.Id, id);
-   public bool IsPreviousState(Enum id) => Equals(previousId, id);
+   public bool HasGlobalTransition(T to) =>
+      globalTransitions.Any(t => t.To.Equals(to));
 
-   public Enum GetPreviousStateId() => previousId;
+   public bool HasPreviousState() => !EqualityComparer<T>.Default.Equals(previousId, default);
+   public bool HasStateId(T id) => states.ContainsKey(id);
+
+   public bool IsCurrentState(T id) => currentState?.Id.Equals(id) ?? false;
+   public bool IsPreviousState(T id) => Equals(previousId, id);
+
+   public T GetPreviousStateId() => previousId;
 
    public string DebugCurrentTransition() => $"{previousId} -> {currentId}";
 
@@ -325,29 +347,38 @@ public partial class StateMachine : Node
       return string.Join("\n", result);
    }
 
+   public string DebugAllStates()
+   {
+      var result = new List<string>();
+
+      foreach (State state in states.Values)
+         result.Add(state.Id.ToString());
+
+      return string.Join("\n", result);
+   }
+
    /* --------------------------------------------------------
    *  NESTED CLASSES
    * -------------------------------------------------------- */
    public class State
    {
-      public Enum Id;
-      public Enum RestartId;
-      public float MinTime;
+      public T Id;
+      public T RestartId;
+      public float MinTime = 0f;
       public float Timeout = -1f;
       public Action<double> Update;
       public Action Enter;
       public Action Exit;
-      public bool Locked;
+      private bool Locked;
 
       public ProcessType processType = ProcessType.PhysicsProcess;
 
       public void Lock() => Locked = true;
       public void Unlock() => Locked = false;
-      public void SetRestartId(Enum value) => RestartId = value;
-      public void SetProcessType(ProcessType type) => processType = type;
+      public void SetRestartId(T value) => RestartId = value;
       public bool IsLocked() => Locked;
 
-      public State(Enum id, Action<double> update, Action enter, Action exit, float minTime, float timeout)
+      public State(T id, Action<double> update, Action enter, Action exit, float minTime, float timeout, ProcessType type = default)
       {
          Id = id;
          Update = update;
@@ -355,16 +386,18 @@ public partial class StateMachine : Node
          Exit = exit;
          MinTime = minTime;
          Timeout = timeout;
+         processType = type;
       }
    }
 
    public class Transition
    {
       private static int nextIndex = 0;
-      public Enum From;
-      public Enum To;
+
+      public T From;
+      public T To;
       public float OverrideMinTime = -1f;
-      public Predicate<StateMachine> Condition;
+      public Predicate<StateMachine<T>> Condition;
       public bool ForceInstantTransition;
       public int Priority;
       public int InsertionIndex { get; private set; }
@@ -381,7 +414,7 @@ public partial class StateMachine : Node
          Priority = value;
       }
 
-      public Transition(Enum from, Enum to, Predicate<StateMachine> condition, float minTime = -1)
+      public Transition(T from, T to, Predicate<StateMachine<T>> condition, float minTime = -1)
       {
          From = from;
          To = to;
@@ -397,4 +430,31 @@ public partial class StateMachine : Node
          return priorityCompare != 0 ? priorityCompare : a.InsertionIndex.CompareTo(b.InsertionIndex);
       }
    }
+
+   public struct TransitionPool
+   {
+      private static Queue<TransitionEvaluator> pool = new();
+      
+      public static TransitionEvaluator Get()
+      {
+         return pool.Count > 0 ? pool.Dequeue() : new TransitionEvaluator();
+      }
+      
+      public static void Return(TransitionEvaluator evaluator)
+      {
+         evaluator.Reset();
+         pool.Enqueue(evaluator);
+      }
+   }
+
+   public class TransitionEvaluator
+   {
+      public List<Transition> CandidateTransitions { get; private set; } = new();
+      
+      public void Reset() => CandidateTransitions.Clear();
+   }
 }
+
+
+
+
