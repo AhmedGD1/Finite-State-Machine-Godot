@@ -469,7 +469,7 @@ public class StateMachine<T> where T : Enum
       {
          AnimationConfig config = new AnimationConfig(animationName, speed, blendTime, loop);
 
-         AddData("Animation", config);
+         AddOrUpdateData("Animation", config);
          return this;
       }
 
@@ -480,7 +480,7 @@ public class StateMachine<T> where T : Enum
          return this;
       }
 
-      public State AddData(string key, object value)
+      public State AddOrUpdateData(string key, object value)
       {
          if (!string.IsNullOrEmpty(key))
             data[key] = value;
@@ -490,13 +490,6 @@ public class StateMachine<T> where T : Enum
       public State RemoveData(string key)
       {
          data.Remove(key);
-         return this;
-      }
-
-      public State SetDataValue(string key, object value)
-      {
-         if (data.ContainsKey(key))
-            data[key] = value;
          return this;
       }
 
@@ -639,8 +632,4 @@ public class StateMachine<T> where T : Enum
       }
    }
 }
-
-
-
-
    
