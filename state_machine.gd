@@ -7,7 +7,6 @@ enum ProcessType{
 
 var states: Dictionary[int, State] = {}
 var transitions: Dictionary[int, Array] = {}
-var signal_conditions: Dictionary[String, bool] = {}
 
 var global_transitions: Array[Transition] = []
 
