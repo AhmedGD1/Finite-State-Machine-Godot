@@ -4,13 +4,114 @@ using System.Linq;
 using System.Collections.Generic;
 
 /* =======================================================================
- *  GENERIC STATE MACHINE
+ *  ANIMATION SYSTEM INTERFACES & IMPLEMENTATIONS
  * ======================================================================= */
+
+/// <summary>
+/// Interface for animation playback compatibility across different Godot node types
+/// </summary>
+public interface IAnimator
+{
+   void PlayAnimation(string name, float speed, float blend, bool loop);
+}
+
+/// <summary>
+/// Extension methods to convert Godot animation nodes to IAnimator
+/// </summary>
+public static class AnimatorExtensions
+{
+   public static IAnimator AsAnimator(this AnimationPlayer player) => new AnimationPlayerAdapter(player);
+   public static IAnimator AsAnimator(this AnimatedSprite2D sprite) => new AnimatedSprite2DAdapter(sprite);
+}
+
+/// <summary>
+/// Adapter for AnimationPlayer nodes
+/// </summary>
+internal class AnimationPlayerAdapter : IAnimator
+{
+   private readonly AnimationPlayer player;
+   public AnimationPlayerAdapter(AnimationPlayer player) => this.player = player;
+   
+   public void PlayAnimation(string name, float speed, float blend, bool loop)
+   {
+      if (player == null || string.IsNullOrEmpty(name)) return;
+      
+      if (!player.HasAnimation(name))
+      {
+         GD.PushWarning($"Animation '{name}' not found in AnimationPlayer");
+         return;
+      }
+      
+      player.Play(name, blend, speed);
+      
+      var animation = player.GetAnimation(name);
+      if (animation != null)
+      {
+         animation.LoopMode = loop ? Animation.LoopModeEnum.Linear : Animation.LoopModeEnum.None;
+      }
+   }
+}
+
+/// <summary>
+/// Adapter for AnimatedSprite2D nodes
+/// </summary>
+internal class AnimatedSprite2DAdapter : IAnimator
+{
+   private readonly AnimatedSprite2D sprite;
+   public AnimatedSprite2DAdapter(AnimatedSprite2D sprite) => this.sprite = sprite;
+   
+   public void PlayAnimation(string name, float speed, float blend, bool loop)
+   {
+      if (sprite?.SpriteFrames == null || string.IsNullOrEmpty(name)) return;
+      
+      if (!sprite.SpriteFrames.HasAnimation(name))
+      {
+         GD.PushWarning($"Animation '{name}' not found in AnimatedSprite2D");
+         return;
+      }
+      
+      sprite.Play(name, speed);
+      sprite.SpriteFrames.SetAnimationLoop(name, loop);
+   }
+}
+
+/// <summary>
+/// Configuration data for state animations
+/// </summary>
+public struct AnimationConfig
+{
+   public string Name { get; private set; }
+   public float Speed { get; private set; }
+   public float CustomBlend { get; private set; }
+   public bool Loop { get; private set; }
+
+   public void PlayAnimation(IAnimator animator)
+   {
+      animator?.PlayAnimation(Name, Speed, CustomBlend, Loop);
+   }
+
+   public AnimationConfig(string name, float speed = 1f, float blend = 0f, bool loop = false)
+   {
+      Name = name ?? "";
+      Speed = Mathf.Max(0.001f, speed); // Prevent zero/negative speed
+      CustomBlend = Mathf.Max(0f, blend);
+      Loop = loop;
+   }
+}
+
+/* =======================================================================
+*  GENERIC STATE MACHINE
+* ======================================================================= */
+
+/// <summary>
+/// Generic finite state machine with support for animations, transitions, and data storage
+/// </summary>
+/// <typeparam name="T">Enum type for state identifiers</typeparam>
 public class StateMachine<T> where T : Enum
 {
    /* --------------------------------------------------------
-    *  ENUMS & EVENTS
-    * -------------------------------------------------------- */
+   *  ENUMS & EVENTS
+   * -------------------------------------------------------- */
    public enum ProcessType { PhysicsProcess, Process }
 
    // Events fired on state/transition changes
@@ -18,8 +119,8 @@ public class StateMachine<T> where T : Enum
    public event Action<T, T> TransitionTriggered;
 
    /* --------------------------------------------------------
-    *  FIELDS
-    * -------------------------------------------------------- */
+   *  FIELDS
+   * -------------------------------------------------------- */
    private Dictionary<T, State> states = new();
    private Dictionary<T, List<Transition>> transitions = new();
    private List<Transition> globalTransitions = new();
@@ -32,14 +133,14 @@ public class StateMachine<T> where T : Enum
 
    private bool hasInitialId;
    private bool paused;
-   private float stateTime;
+   private double stateTime;
 
-   private Node animator;
+   private IAnimator animator;
 
    /* --------------------------------------------------------
-    *  STATE MANAGEMENT
-    * -------------------------------------------------------- */
-   public State AddState(T id, Action<double> update = null, Action enter = null, Action exit = null, float minTime = default, float timeout = -1, ProcessType processType = ProcessType.PhysicsProcess)
+   *  STATE MANAGEMENT
+   * -------------------------------------------------------- */
+   public State AddState(T id, Action<double> update = null, Action enter = null, Action exit = null, double minTime = default, double timeout = -1, ProcessType processType = ProcessType.PhysicsProcess)
    {
       if (states.ContainsKey(id))
       {
@@ -133,8 +234,8 @@ public class StateMachine<T> where T : Enum
    }
 
    /* --------------------------------------------------------
-    *  STATE CHANGING
-    * -------------------------------------------------------- */
+   *  STATE CHANGING
+   * -------------------------------------------------------- */
    public void TryChangeState(T id, bool condition)
    {
       if (condition && states.ContainsKey(id))
@@ -143,7 +244,7 @@ public class StateMachine<T> where T : Enum
 
    public bool ForceChangeState(T id)
    {
-      if (!states.ContainsKey(id) || currentState.IsLocked())
+      if (!states.ContainsKey(id) || (currentState?.IsLocked() ?? false))
          return false;
 
       ChangeStateInternal(id);
@@ -152,9 +253,9 @@ public class StateMachine<T> where T : Enum
 
    public void GoBack()
    {
-      if (!states.ContainsKey(previousId) || currentState.IsLocked())
+      if (!states.ContainsKey(previousId) || (currentState?.IsLocked() ?? false))
       {
-         GD.PushError($"There is no previous state to go back to Or current state is locked. Current State Id: {currentId}");
+         GD.PushError($"There is no previous state to go back to or current state is locked. Current State Id: {currentId}");
          return;
       }
 
@@ -163,7 +264,7 @@ public class StateMachine<T> where T : Enum
 
    public bool GoBackIfPossible()
    {
-      if (!states.ContainsKey(previousId) || currentState.IsLocked())
+      if (!states.ContainsKey(previousId) || (currentState?.IsLocked() ?? false))
          return false;
 
       ChangeStateInternal(previousId);
@@ -182,7 +283,7 @@ public class StateMachine<T> where T : Enum
       if (canExit) currentState.Exit?.Invoke();
 
       // Switch state
-      stateTime = 0f;
+      stateTime = 0.0;
       previousId = currentId;
       currentId = id;
       currentState = states[id];
@@ -201,9 +302,9 @@ public class StateMachine<T> where T : Enum
    }
 
    /* --------------------------------------------------------
-    *  TRANSITION MANAGEMENT
-    * -------------------------------------------------------- */
-   public Transition AddTransition(T fromId, T toId, Predicate<StateMachine<T>> condition, float overrideMinTime = default)
+   *  TRANSITION MANAGEMENT
+   * -------------------------------------------------------- */
+   public Transition AddTransition(T fromId, T toId, Predicate<StateMachine<T>> condition, double overrideMinTime = default)
    {
       if (!states.ContainsKey(toId))
       {
@@ -220,7 +321,21 @@ public class StateMachine<T> where T : Enum
       return transition;
    }
 
-   public Transition AddGlobalTransition(T toId, Predicate<StateMachine<T>> condition, float overrideMinTime = default)
+   public void AddTransition(T[] from, T to, Predicate<StateMachine<T>> condition, double[] overrideMinTime = default)
+   {
+      for (int i = 0; i < from.Length; i++)
+      {
+         T t = from[i];
+         double minTime = -1;
+
+         if (overrideMinTime != null && overrideMinTime.Length > i)
+            minTime = overrideMinTime[i];
+
+         AddTransition(t, to, condition, minTime);
+      }
+   }
+
+   public Transition AddGlobalTransition(T toId, Predicate<StateMachine<T>> condition, double overrideMinTime = default)
    {
       if (!states.ContainsKey(toId))
       {
@@ -275,15 +390,15 @@ public class StateMachine<T> where T : Enum
    public void CleanGlobalTransitions() => globalTransitions.Clear();
 
    /* --------------------------------------------------------
-    *  PROCESSING (UPDATE LOOP)
-    * -------------------------------------------------------- */
+   *  PROCESSING (UPDATE LOOP)
+   * -------------------------------------------------------- */
    public void Update(ProcessType processType, double delta)
    {
       if (paused || currentState == null) return;
 
       if (currentState.processType == processType)
       {
-         stateTime += (float)delta;
+         stateTime += delta;
          currentState.Update?.Invoke(delta);
          CheckTransitions();
       }
@@ -293,6 +408,7 @@ public class StateMachine<T> where T : Enum
    {
       // Timeout transition
       bool timeoutTriggered = currentState.Timeout > 0f && stateTime >= currentState.Timeout;
+
       if (timeoutTriggered)
       {
          var restartId = currentState.RestartId;
@@ -329,7 +445,7 @@ public class StateMachine<T> where T : Enum
    {
       foreach (Transition transition in candidateTransitions)
       {
-         float requiredTime = transition.OverrideMinTime > 0f ? transition.OverrideMinTime : currentState.MinTime;
+         double requiredTime = transition.OverrideMinTime > 0 ? transition.OverrideMinTime : currentState.MinTime;
          bool timeRequirementMet = transition.ForceInstantTransition || stateTime >= requiredTime;
 
          if (timeRequirementMet && (transition.Condition?.Invoke(this) ?? true))
@@ -342,8 +458,8 @@ public class StateMachine<T> where T : Enum
    }
 
    /* --------------------------------------------------------
-    *  PAUSE / RESUME
-    * -------------------------------------------------------- */
+   *  PAUSE / RESUME
+   * -------------------------------------------------------- */
    public void Pause() => paused = true;
    public bool IsPaused() => paused;
 
@@ -353,12 +469,12 @@ public class StateMachine<T> where T : Enum
       if (resetTime) ResetStateTime();
    }
 
-   public void ResetStateTime() => stateTime = 0f;
+   public void ResetStateTime() => stateTime = 0.0;
 
    /* --------------------------------------------------------
-    *  GETTERS / DEBUG
-    * -------------------------------------------------------- */
-   public void SetAnimator(Node what) => animator = what;
+   *  GETTERS / DEBUG
+   * -------------------------------------------------------- */
+   public void SetAnimator(IAnimator what) => animator = what;
 
    public bool SetGlobalData(string key, object value)
    {
@@ -374,11 +490,11 @@ public class StateMachine<T> where T : Enum
 
    public T GetCurrentStateId() => currentState != null ? currentState.Id : default;
    public T GetInitialStateId() => initialId;
-   public float GetStateTime() => stateTime;
-   public float GetMinStateTime() => currentState?.MinTime ?? 0f;
+   public double GetStateTime() => stateTime;
+   public double GetMinStateTime() => currentState?.MinTime ?? 0;
 
-   public float GetRemainingTime() =>
-      currentState?.Timeout > 0 ? Mathf.Max(0, currentState.Timeout - stateTime) : -1f;
+   public double GetRemainingTime() =>
+      currentState?.Timeout > 0 ? Mathf.Max(0, currentState.Timeout - stateTime) : -1;
 
    public bool HasTransition(T from, T to) =>
       transitions.ContainsKey(from) && transitions[from].Any(t => t.To.Equals(to));
@@ -422,14 +538,18 @@ public class StateMachine<T> where T : Enum
    }
 
    /* --------------------------------------------------------
-    *  NESTED CLASSES
-    * -------------------------------------------------------- */
+   *  NESTED CLASSES
+   * -------------------------------------------------------- */
+
+   /// <summary>
+   /// Represents a single state in the state machine
+   /// </summary>
    public class State
    {
       public T Id { get; private set; }
       public T RestartId { get; private set; }
-      public float MinTime { get; private set; }
-      public float Timeout { get; private set; }
+      public double MinTime { get; private set; }
+      public double Timeout { get; private set; }
       public Action<double> Update { get; private set; }
       public Action Enter { get; private set; }
       public Action Exit { get; private set; }
@@ -460,6 +580,12 @@ public class StateMachine<T> where T : Enum
          return this;
       }
 
+      public State SetProcessType(ProcessType type)
+      {
+         processType = type;
+         return this;
+      }
+
       public bool IsLocked() => Locked;
       public bool HasTag(string tag) => Tags.Contains(tag);
       public bool HasData(string key) => Data.ContainsKey(key);
@@ -468,7 +594,6 @@ public class StateMachine<T> where T : Enum
       public State SetAnimationData(string animationName, float speed = 1f, float blendTime = -1f, bool loop = false)
       {
          AnimationConfig config = new AnimationConfig(animationName, speed, blendTime, loop);
-
          AddOrUpdateData("Animation", config);
          return this;
       }
@@ -507,10 +632,10 @@ public class StateMachine<T> where T : Enum
 
       public TData GetData<TData>(string key, TData defaultValue = default)
       {
-         return TryGetData<TData>(key, out var result) ? (TData)result : defaultValue;
+         return TryGetData<TData>(key, out var result) ? result : defaultValue;
       }
 
-      public State(T id, Action<double> update, Action enter, Action exit, float minTime, float timeout, ProcessType type = default)
+      public State(T id, Action<double> update, Action enter, Action exit, double minTime, double timeout, ProcessType type = default)
       {
          Id = id;
          Update = update;
@@ -523,13 +648,16 @@ public class StateMachine<T> where T : Enum
       }
    }
 
+   /// <summary>
+   /// Represents a transition between states
+   /// </summary>
    public class Transition
    {
       private static int nextIndex = 0;
 
       public T From { get; private set; }
       public T To { get; private set; }
-      public float OverrideMinTime { get; private set; }
+      public double OverrideMinTime { get; private set; }
       public Predicate<StateMachine<T>> Condition { get; private set; }
       public bool ForceInstantTransition { get; private set; }
       public int Priority { get; private set; }
@@ -553,19 +681,18 @@ public class StateMachine<T> where T : Enum
          return this;
       }
 
-      public Transition SetMinTime(float time)
+      public Transition SetMinTime(double time)
       {
          OverrideMinTime = time;
          return this;
       }
 
-      public Transition(T from, T to, Predicate<StateMachine<T>> condition, float minTime = -1)
+      public Transition(T from, T to, Predicate<StateMachine<T>> condition, double minTime = -1)
       {
          From = from;
          To = to;
          Condition = condition;
          OverrideMinTime = minTime;
-
          InsertionIndex = nextIndex++;
       }
 
@@ -576,7 +703,10 @@ public class StateMachine<T> where T : Enum
       }
    }
 
-   public struct TransitionPool
+   /// <summary>
+   /// Object pool for transition evaluators to reduce garbage collection
+   /// </summary>
+   public static class TransitionPool
    {
       private static Queue<TransitionEvaluator> pool = new();
 
@@ -592,44 +722,14 @@ public class StateMachine<T> where T : Enum
       }
    }
 
+   /// <summary>
+   /// Helper class for evaluating transitions
+   /// </summary>
    public class TransitionEvaluator
    {
       public List<Transition> CandidateTransitions { get; private set; } = new();
 
       public void Reset() => CandidateTransitions.Clear();
-
       public bool HasCandidates() => CandidateTransitions.Count > 0;
    }
-
-   public struct AnimationConfig
-   {
-      public string Name { get; private set; }
-      public float Speed { get; private set; } = 1.0f;
-      public float CustomBlend { get; private set; } = -1f;
-      public bool Loop { get; private set; }
-
-      public void PlayAnimation(object animator)
-      {  
-         if (animator is AnimationPlayer animationPlayer)
-         {
-            animationPlayer.Play(Name, CustomBlend, Speed);
-            animationPlayer.GetAnimation(Name).LoopMode = Loop ? Animation.LoopModeEnum.Linear : Animation.LoopModeEnum.None;
-         }
-
-         if (animator is AnimatedSprite2D sprite)
-         {
-            sprite.Play(Name, Speed);
-            sprite.SpriteFrames.SetAnimationLoop(Name, Loop);
-         }
-      }
-
-      public AnimationConfig(string name, float speed, float blend, bool loop)
-      {
-         Name = name;
-         Speed = speed;
-         CustomBlend = blend;
-         Loop = loop;
-      }
-   }
 }
-   
