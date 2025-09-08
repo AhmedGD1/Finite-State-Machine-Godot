@@ -140,11 +140,24 @@ public class StateMachine<T> where T : Enum
    /* --------------------------------------------------------
    *  ENUMS & EVENTS
    * -------------------------------------------------------- */
-   public enum ProcessType { PhysicsProcess, Process }
+   public enum ProcessType
+   {
+      PhysicsProcess,
+      Process
+   }
+
+   public enum LockType
+   {
+      None, // lock disabled;
+      Full, // Locks transitions & timeout Transitions;
+      Transition // Only Locks transitions;
+   }
 
    // Events fired on state/transition changes
    public event Action<T, T> StateChanged;
    public event Action<T, T> TransitionTriggered;
+   public event Action<T> TimeoutBlocked;
+   public event Action<T> StateTimeout;
 
    /* --------------------------------------------------------
    *  FIELDS
@@ -441,13 +454,20 @@ public class StateMachine<T> where T : Enum
 
       if (timeoutTriggered)
       {
+         if (currentState.IsFullyLocked())
+         {
+            TimeoutBlocked?.Invoke(currentId);
+            return;
+         }
+
+         StateTimeout?.Invoke(currentId);
          var restartId = currentState.RestartId;
          ChangeStateInternal(restartId);
          TransitionTriggered?.Invoke(currentId, restartId);
          return;
       }
 
-      if (currentState.IsLocked()) return;
+      if (currentState.TransitionBlocked()) return;
 
       var evaluator = TransitionPool.Get();
 
@@ -585,23 +605,23 @@ public class StateMachine<T> where T : Enum
       public Action Enter { get; private set; }
       public Action Exit { get; private set; }
       public ProcessType processType { get; private set; }
+      public LockType LockType { get; private set; }
 
-      private bool Locked;
       private HashSet<string> tags = new();
       private Dictionary<string, object> data = new();
 
       public IReadOnlyCollection<string> Tags => tags;
       public IReadOnlyDictionary<string, object> Data => data;
 
-      public State Lock()
+      public State Lock(LockType type = LockType.Transition)
       {
-         Locked = true;
+         LockType = type;
          return this;
       }
 
       public State Unlock()
       {
-         Locked = false;
+         LockType = LockType.None;
          return this;
       }
 
@@ -617,7 +637,10 @@ public class StateMachine<T> where T : Enum
          return this;
       }
 
-      public bool IsLocked() => Locked;
+      public bool IsLocked() => LockType != LockType.None;
+      public bool IsFullyLocked() => LockType == LockType.Full;
+      public bool TransitionBlocked() => LockType == LockType.Transition;
+
       public bool HasTag(string tag) => Tags.Contains(tag);
       public bool HasData(string key) => Data.ContainsKey(key);
       public IEnumerable<string> GetTags() => Tags;
@@ -703,6 +726,12 @@ public class StateMachine<T> where T : Enum
       public Transition SetPriority(int value)
       {
          Priority = Math.Max(0, value);
+         return this;
+      }
+
+      public Transition SetHeighestPriority()
+      {
+         Priority = int.MaxValue;
          return this;
       }
 
