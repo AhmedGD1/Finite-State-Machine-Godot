@@ -37,7 +37,7 @@ internal class AnimationPlayerAdapter : IAnimator
 
    public void PlayAnimation(string name, float speed, float blend, bool loop, Action onFinished = null)
    {
-      if (player == null || string.IsNullOrEmpty(name)) return;
+      if (player == null || name is null or "") return;
       if (!player.HasAnimation(name))
       {
          GD.PushWarning($"Animation '{name}' not found in AnimationPlayer");
@@ -77,7 +77,7 @@ internal class AnimatedSprite2DAdapter : IAnimator
 
    public void PlayAnimation(string name, float speed, float blend, bool loop, Action onFinished = null)
    {
-      if (sprite?.SpriteFrames == null || string.IsNullOrEmpty(name)) return;
+      if (sprite?.SpriteFrames == null || name is null or "") return;
       if (!sprite.SpriteFrames.HasAnimation(name))
       {
          GD.PushWarning($"Animation '{name}' not found in AnimatedSprite2D");
@@ -101,30 +101,10 @@ internal class AnimatedSprite2DAdapter : IAnimator
    }
 }
 
-public struct AnimationConfig
+public readonly record struct AnimationConfig(string Name, float Speed = 1f, float CustomBlend = 0f, bool Loop = false, Action OnFinished = null)
 {
-   public string Name { get; private set; }
-   public float Speed { get; private set; }
-   public float CustomBlend { get; private set; }
-   public bool Loop { get; private set; }
-   public Action OnFinished { get; private set; }
-
-   public void PlayAnimation(IAnimator animator)
-   {
+   public void PlayAnimation(IAnimator animator) =>
       animator?.PlayAnimation(Name, Speed, CustomBlend, Loop, OnFinished);
-   }
-
-   public AnimationConfig(string name, float speed = 1f, float blend = 0f, bool loop = false, Action onFinished = null)
-   {
-      Name = name ?? "";
-      Speed = Mathf.Max(0.001f, speed);
-      CustomBlend = Mathf.Max(0f, blend);
-      Loop = loop;
-      OnFinished = onFinished;
-
-      if (speed == 0.001f)
-         GD.PushWarning("Animation speed is extremely low: 0.001f");
-   }
 }
 
 /* =======================================================================
@@ -529,7 +509,7 @@ public class StateMachine<T> where T : Enum
 
    public bool SetGlobalData(string key, object value)
    {
-      if (string.IsNullOrEmpty(key)) return false;
+      if (key is null or "") return false;
       globalData[key] = value;
       return true;
    }
@@ -607,8 +587,8 @@ public class StateMachine<T> where T : Enum
       public ProcessType processType { get; private set; }
       public LockType LockType { get; private set; }
 
-      private HashSet<string> tags = new();
-      private Dictionary<string, object> data = new();
+      private readonly HashSet<string> tags = new();
+      private readonly Dictionary<string, object> data = new();
 
       public IReadOnlyCollection<string> Tags => tags;
       public IReadOnlyDictionary<string, object> Data => data;
@@ -648,6 +628,12 @@ public class StateMachine<T> where T : Enum
       public State SetAnimationData(string animationName, float speed = 1f, float blendTime = -1f, bool loop = false, Action onFinished = null)
       {
          AnimationConfig config = new AnimationConfig(animationName, speed, blendTime, loop, onFinished);
+         SetData("Animation", config);
+         return this;
+      }
+
+      public State SetAnimationConfig(AnimationConfig config)
+      {
          SetData("Animation", config);
          return this;
       }
