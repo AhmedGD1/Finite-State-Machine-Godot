@@ -1,4 +1,4 @@
-class_name StateMachine extends RefCounted
+class_name StateMachine
 
 signal state_changed(prev: int, next: int)
 signal transition_triggered(from: int, to: int)
