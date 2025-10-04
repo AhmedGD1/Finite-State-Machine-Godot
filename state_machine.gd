@@ -344,7 +344,7 @@ func _create_condition_from_signal(sig: Signal) -> Callable:
 		push_error("Signal has no valid object")
 		return func(): return false
 	
-	var weak_ref: WeakRef  = weakref(obj) as WeakRef # to detect when object is freed
+	var weak_ref: WeakRef = weakref(obj) as WeakRef
 	
 	if !signal_conditions.has(obj):
 		signal_conditions[obj] = {}
@@ -355,8 +355,11 @@ func _create_condition_from_signal(sig: Signal) -> Callable:
 	
 	var connection: Callable = func(..._args: Array) -> void:
 		var current_obj: Object = weak_ref.get_ref()
-		if current_obj: # object still exist
-			signal_conditions[current_obj][key] = true
+		if current_obj:
+			# Only set the flag if the state is not locked
+			# This prevents signals from queuing up during locked periods
+			if current_state != null && !current_state.is_locked():
+				signal_conditions[current_obj][key] = true
 		else:
 			_cleanup_object_signals(obj)
 	
@@ -367,6 +370,12 @@ func _create_condition_from_signal(sig: Signal) -> Callable:
 		var current_obj: Object = weak_ref.get_ref()
 		if current_obj == null:
 			_cleanup_object_signals(obj)
+			return false
+		
+		# Double-check lock status when condition is evaluated
+		if current_state != null && current_state.is_locked():
+			# Clear any stale flags that might have been set
+			signal_conditions[current_obj][key] = false
 			return false
 		
 		if signal_conditions[current_obj].get(key, false):
