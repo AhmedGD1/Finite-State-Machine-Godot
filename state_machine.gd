@@ -111,7 +111,7 @@ func _init(sm_enum: Dictionary) -> void:
 ## @param timeout: If > 0, automatically transitions to restart_id after this many seconds
 ## @param process_type: Whether to use Process or PhysicsProcess for updates
 ## @return: The created State object for further configuration (chaining)
-func add_state(id: int, update = null, enter = null, exit = null, min_time: float = 0, timeout: float = -1, process_type: ProcessType = ProcessType.PhysicsProcess) -> State:
+func add_state(id: int, update: Callable = Callable(), enter: Callable = Callable(), exit: Callable = Callable(), min_time: float = 0, timeout: float = -1, process_type: ProcessType = ProcessType.PhysicsProcess) -> State:
 	if states.has(id):
 		push_error("Trying to store an existent state %s" % id)
 		return null
@@ -123,6 +123,8 @@ func add_state(id: int, update = null, enter = null, exit = null, min_time: floa
 		initial_id = id
 		has_initial_id = true
 	
+	if has_initial_id:
+		state.restart_id = initial_id
 	return state
 
 ## Starts the state machine by transitioning to the initial state.
@@ -252,7 +254,7 @@ func _change_state_internal(id: int, ignore_exit: bool = false) -> void:
 		push_error("Trying to switch to a non-existent state")
 		return
 	
-	var canExit: bool = !ignore_exit && current_state != null && !current_state.is_locked() && current_state.exit
+	var canExit: bool = !ignore_exit && current_state != null && !current_state.is_locked() && current_state.exit.is_valid()
 	if canExit: current_state.exit.call()
 	
 	state_time = 0.0
@@ -260,7 +262,7 @@ func _change_state_internal(id: int, ignore_exit: bool = false) -> void:
 	current_id = id
 	current_state = states[id]
 	
-	if current_state.enter:
+	if current_state.enter.is_valid():
 		current_state.enter.call()
 	
 	# Auto-play animation if configured
@@ -358,7 +360,7 @@ func _create_condition_from_signal(sig: Signal) -> Callable:
 		else:
 			_cleanup_object_signals(obj)
 	
-	sig.connect(connection, CONNECT_DEFERRED)
+	sig.connect(connection)
 	signal_connections[obj].append({"signal": sig, "connection": connection})
 	
 	return func() -> bool:
@@ -442,7 +444,6 @@ func process(process_type: ProcessType, delta: float) -> void:
 ## Handles timeout transitions and evaluates all candidate transitions.
 func _check_transitions() -> void:
 	var timeout_triggered: bool = current_state.timeout > 0 && state_time >= current_state.timeout
-	
 	if timeout_triggered:
 		if current_state.is_fully_locked():
 			timeout_blocked.emit(current_id)
@@ -475,12 +476,12 @@ func _check_transition_loop(candidate_transitions: Array[Transition]) -> void:
 	for transition: Transition in candidate_transitions:
 		var required_time: float = transition.override_min_time if transition.override_min_time > 0.0 else current_state.min_time
 		var time_requirement_met: bool = transition.force_instant_transition || state_time >= required_time
-		
+	
 		if time_requirement_met && transition.condition.call():
 			_change_state_internal(transition.to)
 			transition_triggered.emit(transition.from, transition.to)
 			
-			if transition.on_triggered != null:
+			if transition.on_triggered.is_valid():
 				transition.on_triggered.call()
 			return
 
@@ -574,7 +575,20 @@ func get_remaining_time() -> float:
 ## @param id: State ID to look up
 ## @return: State name string, or stringified ID if not found in enum
 func get_state_name(id: int) -> String:
-	return states_enum.get(id, str(id))
+	return states_enum.keys()[id]
+
+## Gets the string name of the current state from its ID.
+##
+## @return: State name string, or stringified ID if not found in enum
+func get_current_state_name() -> String:
+	return states_enum.keys()[current_id]
+
+## Gets the state from its name.
+##
+## @return: State class, or null string if not found in enum
+func get_state_with_name(state_name: String) -> State:
+	var index: int = states_enum.keys().find(state_name)
+	return states[index] if states.has(index) else "Null"
 
 ## Checks if a transition exists between two states.
 ##
@@ -636,7 +650,9 @@ func is_in_state_with_tag(tag: String) -> bool:
 ##
 ## @return: String in format "previous_id -> current_id"
 func debug_current_transition() -> String:
-	return "%s -> %s" % [previous_id, current_id]
+	var prev: String = states_enum.keys()[previous_id]
+	var current: String = states_enum.keys()[current_id]
+	return "%s -> %s" % [prev, current]
 
 ## Returns a debug string listing all transitions with priorities.
 ##
@@ -677,13 +693,13 @@ class State:
 	var timeout: float = -1
 	
 	## Callback executed each frame: Callable(delta: float)
-	var update: Variant
+	var update: Callable
 	
 	## Callback executed when entering this state: Callable()
-	var enter: Variant
+	var enter: Callable
 	
 	## Callback executed when leaving this state: Callable()
-	var exit: Variant
+	var exit: Callable
 	
 	## Which process type this state uses for updates
 	var process_type: ProcessType
@@ -704,7 +720,7 @@ class State:
 	## @param on_finished: Callable to execute when animation finishes
 	## @param speed: Animation playback speed multiplier
 	## @param blend: Blend time when transitioning to this animation
-	func set_animation_data(anim_name: String, loop: bool, on_finished = null, speed: float = 1, blend: float = 0) -> void:
+	func set_animation_data(anim_name: String, loop: bool = false, on_finished = null, speed: float = 1, blend: float = 0) -> void:
 		var config: AnimationConfig = AnimationConfig.new(anim_name, speed, blend, loop, on_finished)
 		set_data("animation", config)
 	
@@ -712,7 +728,7 @@ class State:
 	##
 	## @param type: Type of lock (Full, Transition, or None)
 	## @return: Self for method chaining
-	func lock(type: LockType) -> State:
+	func lock(type: LockType = LockType.Full) -> State:
 		lock_type = type
 		return self
 	
@@ -816,7 +832,7 @@ class State:
 	## @param new_min_time: Minimum time before transitions
 	## @param new_timeout: Timeout duration (or -1 for no timeout)
 	## @param new_pt: Process type for this state
-	func _init(new_id: int, new_update, new_enter, new_exit, new_min_time: float, new_timeout: float, new_pt: ProcessType) -> void:
+	func _init(new_id: int, new_update: Callable, new_enter: Callable, new_exit: Callable, new_min_time: float, new_timeout: float, new_pt: ProcessType) -> void:
 		id = new_id
 		update = new_update
 		enter = new_enter
@@ -824,8 +840,7 @@ class State:
 		min_time = new_min_time
 		timeout = new_timeout
 		process_type = new_pt
-		restart_id = new_id
-		
+		restart_id = id
 		lock_type = LockType.None
 
 ## Represents a transition between states with a condition and priority.
@@ -853,7 +868,7 @@ class Transition:
 	var insertion_index: int
 	
 	## Optional callback executed when this transition triggers: Callable()
-	var on_triggered: Variant
+	var on_triggered: Callable
 	
 	## Maximum possible priority value
 	const HIGHEST_PRIORITY: int = 9999999999
@@ -917,8 +932,9 @@ class Transition:
 	## @param b: Second transition
 	## @return: Comparison result for sorting
 	static func compare(a: Transition, b: Transition) -> int:
-		var priority_diff: int = b.priority - a.priority
-		return priority_diff if priority_diff != 0 else (a.insertion_index - b.insertion_index)
+		if a.priority == b.priority:
+			return a.insertion_index - b.insertion_index
+		return b.priority - a.priority
 
 ## Object pool for TransitionEvaluator instances to reduce allocations.
 ## Used internally by the state machine to optimize transition checking.
@@ -1058,7 +1074,6 @@ class AnimationPlayerAdapter:
 	func _init(anim_player: AnimationPlayer) -> void:
 		player = anim_player
 		player.animation_finished.connect(_on_animation_finished_signal)
-	
 	## Plays an animation with specified settings.
 	##
 	## @param anim_name: Name of animation to play
@@ -1078,7 +1093,7 @@ class AnimationPlayerAdapter:
 		if animation != null:
 			animation.loop_mode = Animation.LOOP_LINEAR if loop else Animation.LOOP_NONE
 		
-		if on_finished != null:
+		if on_finished.is_valid():
 			finish_callbacks[anim_name] = on_finished
 		player.play(anim_name, blend, speed)
 	
