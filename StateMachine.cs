@@ -4,6 +4,24 @@ using System.Linq;
 using System.Collections.Generic;
 
 // NOTE: FSM is not thread-safe. Access only from main thread.
+
+/* =======================================================================
+ *  ENUMS
+ * ======================================================================= */
+public enum StateProcessType
+{
+   PhysicsProcess,
+   Process
+}
+
+public enum StateLockType
+{
+   None, // lock disabled;
+   Full, // Locks transitions & timeout Transitions;
+   Transition // Only Locks transitions;
+}
+
+
 /* =======================================================================
  *  ANIMATION SYSTEM INTERFACES & IMPLEMENTATIONS
  * ======================================================================= */
@@ -37,7 +55,7 @@ internal class AnimationPlayerAdapter : IAnimator
 
    public void PlayAnimation(string name, float speed, float blend, bool loop, Action onFinished = null)
    {
-      if (player == null || name is null or "") return;
+      if (player == null || string.IsNullOrEmpty(name)) return;
       if (!player.HasAnimation(name))
       {
          GD.PushWarning($"Animation '{name}' not found in AnimationPlayer");
@@ -77,7 +95,7 @@ internal class AnimatedSprite2DAdapter : IAnimator
 
    public void PlayAnimation(string name, float speed, float blend, bool loop, Action onFinished = null)
    {
-      if (sprite?.SpriteFrames == null || name is null or "") return;
+      if (sprite?.SpriteFrames == null || string.IsNullOrEmpty(name)) return;
       if (!sprite.SpriteFrames.HasAnimation(name))
       {
          GD.PushWarning($"Animation '{name}' not found in AnimatedSprite2D");
@@ -101,10 +119,30 @@ internal class AnimatedSprite2DAdapter : IAnimator
    }
 }
 
-public readonly record struct AnimationConfig(string Name, float Speed = 1f, float CustomBlend = 0f, bool Loop = false, Action OnFinished = null)
+public struct AnimationConfig
 {
-   public void PlayAnimation(IAnimator animator) =>
+   public string Name { get; private set; }
+   public float Speed { get; private set; }
+   public float CustomBlend { get; private set; }
+   public bool Loop { get; private set; }
+   public Action OnFinished { get; private set; }
+
+   public void PlayAnimation(IAnimator animator)
+   {
       animator?.PlayAnimation(Name, Speed, CustomBlend, Loop, OnFinished);
+   }
+
+   public AnimationConfig(string name, float speed = 1f, float blend = 0f, bool loop = false, Action onFinished = null)
+   {
+      Name = name ?? "";
+      Speed = Mathf.Max(0.001f, speed);
+      CustomBlend = Mathf.Max(0f, blend);
+      Loop = loop;
+      OnFinished = onFinished;
+
+      if (speed == 0.001f)
+         GD.PushWarning("Animation speed is extremely low: 0.001f");
+   }
 }
 
 /* =======================================================================
@@ -118,20 +156,8 @@ public readonly record struct AnimationConfig(string Name, float Speed = 1f, flo
 public class StateMachine<T> where T : Enum
 {
    /* --------------------------------------------------------
-   *  ENUMS & EVENTS
+   *  EVENTS
    * -------------------------------------------------------- */
-   public enum ProcessType
-   {
-      PhysicsProcess,
-      Process
-   }
-
-   public enum LockType
-   {
-      None, // lock disabled;
-      Full, // Locks transitions & timeout Transitions;
-      Transition // Only Locks transitions;
-   }
 
    // Events fired on state/transition changes
    public event Action<T, T> StateChanged;
@@ -161,7 +187,7 @@ public class StateMachine<T> where T : Enum
    /* --------------------------------------------------------
    *  STATE MANAGEMENT
    * -------------------------------------------------------- */
-   public State AddState(T id, Action<double> update = null, Action enter = null, Action exit = null, float minTime = default, float timeout = -1, ProcessType processType = ProcessType.PhysicsProcess)
+   public State AddState(T id, Action<double> update = null, Action enter = null, Action exit = null, float minTime = default, float timeout = -1, StateProcessType processType = StateProcessType.PhysicsProcess)
    {
       if (states.ContainsKey(id))
       {
@@ -177,11 +203,16 @@ public class StateMachine<T> where T : Enum
       {
          initialId = id;
          hasInitialId = true;
-         ChangeStateInternal(id, ignoreExit: true);
       }
 
       state.SetRestartId(initialId);
       return state;
+   }
+
+   public void Start()
+   {
+      if (hasInitialId)
+         ChangeStateInternal(initialId, true);
    }
 
    public void RemoveState(T id)
@@ -415,7 +446,7 @@ public class StateMachine<T> where T : Enum
    /* --------------------------------------------------------
    *  PROCESSING (UPDATE LOOP)
    * -------------------------------------------------------- */
-   public void Update(ProcessType processType, double delta)
+   public void Process(StateProcessType processType, double delta)
    {
       if (paused || currentState == null) return;
 
@@ -509,7 +540,7 @@ public class StateMachine<T> where T : Enum
 
    public bool SetGlobalData(string key, object value)
    {
-      if (key is null or "") return false;
+      if (string.IsNullOrEmpty(key)) return false;
       globalData[key] = value;
       return true;
    }
@@ -584,16 +615,16 @@ public class StateMachine<T> where T : Enum
       public Action<double> Update { get; private set; }
       public Action Enter { get; private set; }
       public Action Exit { get; private set; }
-      public ProcessType processType { get; private set; }
-      public LockType LockType { get; private set; }
+      public StateProcessType processType { get; private set; }
+      public StateLockType LockType { get; private set; }
 
-      private readonly HashSet<string> tags = new();
-      private readonly Dictionary<string, object> data = new();
+      private HashSet<string> tags = new();
+      private Dictionary<string, object> data = new();
 
       public IReadOnlyCollection<string> Tags => tags;
       public IReadOnlyDictionary<string, object> Data => data;
 
-      public State Lock(LockType type = LockType.Transition)
+      public State Lock(StateLockType type = StateLockType.Transition)
       {
          LockType = type;
          return this;
@@ -601,7 +632,7 @@ public class StateMachine<T> where T : Enum
 
       public State Unlock()
       {
-         LockType = LockType.None;
+         LockType = StateLockType.None;
          return this;
       }
 
@@ -611,15 +642,15 @@ public class StateMachine<T> where T : Enum
          return this;
       }
 
-      public State SetProcessType(ProcessType type)
+      public State SetProcessType(StateProcessType type)
       {
          processType = type;
          return this;
       }
 
-      public bool IsLocked() => LockType != LockType.None;
-      public bool IsFullyLocked() => LockType == LockType.Full;
-      public bool TransitionBlocked() => LockType == LockType.Transition;
+      public bool IsLocked() => LockType != StateLockType.None;
+      public bool IsFullyLocked() => LockType == StateLockType.Full;
+      public bool TransitionBlocked() => LockType == StateLockType.Transition;
 
       public bool HasTag(string tag) => Tags.Contains(tag);
       public bool HasData(string key) => Data.ContainsKey(key);
@@ -628,12 +659,6 @@ public class StateMachine<T> where T : Enum
       public State SetAnimationData(string animationName, float speed = 1f, float blendTime = -1f, bool loop = false, Action onFinished = null)
       {
          AnimationConfig config = new AnimationConfig(animationName, speed, blendTime, loop, onFinished);
-         SetData("Animation", config);
-         return this;
-      }
-
-      public State SetAnimationConfig(AnimationConfig config)
-      {
          SetData("Animation", config);
          return this;
       }
@@ -675,7 +700,7 @@ public class StateMachine<T> where T : Enum
          return TryGetData<TData>(key, out var result) ? result : defaultValue;
       }
 
-      public State(T id, Action<double> update, Action enter, Action exit, float minTime, float timeout, ProcessType type = default)
+      public State(T id, Action<double> update, Action enter, Action exit, float minTime, float timeout, StateProcessType type = default)
       {
          Id = id;
          Update = update;
