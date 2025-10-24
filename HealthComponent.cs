@@ -2,27 +2,68 @@ using Godot;
 using System;
 using Godot.Collections;
 
+/// <summary>
+/// MADE BY AHMED GD ,
+/// A flexible health management component with damage calculation, resistances, immunities, regeneration, and invincibility frames.
+/// </summary>
 [GlobalClass]
 public partial class HealthComponent : Node
 {
+    /// <summary>
+    /// Types of damage that can be dealt to entities.
+    /// </summary>
     public enum DamageType
     {
+        /// <summary>No specific damage type.</summary>
         Default,
+        /// <summary>Damage from poison or toxins.</summary>
         Poison,
+        /// <summary>Physical melee damage.</summary>
         Physical,
+        /// <summary>Ranged projectile damage.</summary>
         Ranged
     }
 
+    /// <summary>
+    /// Regeneration behavior modes.
+    /// </summary>
     public enum RegenType
     {
+        /// <summary>Smooth continuous healing every frame.</summary>
         Sequential,
+        /// <summary>Healing applied in discrete chunks at intervals.</summary>
         Intermittent
     }
 
+    /// <summary>
+    /// Emitted when health value changes.
+    /// </summary>
+    /// <param name="oldHealth">Previous health value.</param>
+    /// <param name="newHealth">New health value.</param>
     [Signal] public delegate void HealthChangedEventHandler(float oldHealth, float newHealth);
+    
+    /// <summary>
+    /// Emitted when the entity takes damage.
+    /// </summary>
+    /// <param name="source">The node that dealt the damage.</param>
+    /// <param name="amount">Final damage amount after modifiers.</param>
     [Signal] public delegate void DamagedEventHandler(Node source, float amount);
+    
+    /// <summary>
+    /// Emitted when the entity is healed.
+    /// </summary>
+    /// <param name="amount">Amount of health restored.</param>
     [Signal] public delegate void HealedEventHandler(float amount);
+    
+    /// <summary>
+    /// Emitted when the entity dies (health reaches MinHealth).
+    /// </summary>
+    /// <param name="source">The node that dealt the killing blow.</param>
     [Signal] public delegate void DiedEventHandler(Node source);
+    
+    /// <summary>
+    /// Emitted when health reaches maximum value.
+    /// </summary>
     [Signal] public delegate void FullyHealedEventHandler();
 
     [Export(PropertyHint.Range, "1, 1000")]
@@ -63,8 +104,19 @@ public partial class HealthComponent : Node
     [Export]
     private float intermittentTime = 0.3f;
 
+    /// <summary>
+    /// Current health value. Read-only.
+    /// </summary>
     public float CurrentHealth { get; private set; }
+    
+    /// <summary>
+    /// Minimum health before entity is considered dead. Default is 0.
+    /// </summary>
     public float MinHealth { get; private set; }
+    
+    /// <summary>
+    /// Default target health value for regeneration.
+    /// </summary>
     public float DefaultRegenTarget { get; private set; }
 
     private float invincibilityTimer;
@@ -78,6 +130,9 @@ public partial class HealthComponent : Node
     private bool wasRegenerating;
     private bool fullyHealedTriggered;
 
+    /// <summary>
+    /// Maximum health value. Read-only.
+    /// </summary>
     public float MaxHealth => maxHealth;
 
     public override void _Ready()
@@ -117,6 +172,7 @@ public partial class HealthComponent : Node
                 isRegenerating = true;
         }
 
+
         if (regenRate > 0 && isRegenerating)
         {
             float amount = regenRate * (float)delta;
@@ -151,6 +207,9 @@ public partial class HealthComponent : Node
         }
     }
 
+    /// <summary>
+    /// Resets health to maximum and clears all timers.
+    /// </summary>
     public void ResetHealth()
     {
         SetHealth(maxHealth);
@@ -163,11 +222,19 @@ public partial class HealthComponent : Node
         stackedHealth = 0f;
     }
 
+    /// <summary>
+    /// Ends invincibility frames immediately.
+    /// </summary>
     public void ResetInvincibility()
     {
         invincibilityTimer = 0f;
     }
 
+    /// <summary>
+    /// Applies damage to the entity using a DamageData object.
+    /// </summary>
+    /// <param name="data">Damage data containing source, amount, type, and knockback information.</param>
+    /// <returns>True if damage was applied, false if immune, invincible, or dead.</returns>
     public bool TakeDamage(DamageData data)
     {
         bool isImmune = immunity.Count > 0 && immunity.Contains(data.DamageType);
@@ -197,16 +264,35 @@ public partial class HealthComponent : Node
         return true;
     }
 
+    /// <summary>
+    /// Applies damage to the entity with simplified parameters.
+    /// </summary>
+    /// <param name="source">The node dealing the damage.</param>
+    /// <param name="amount">Raw damage amount before modifiers.</param>
+    /// <param name="damageType">Type of damage for resistance calculation.</param>
+    /// <param name="force">Knockback force (for external systems).</param>
+    /// <param name="dir">Direction of the hit (defaults to Vector2.Up).</param>
+    /// <returns>True if damage was applied, false if immune, invincible, or dead.</returns>
     public bool TakeDamage(Node source, float amount, DamageType damageType = DamageType.Default, float force = 0f, Vector2? dir = null)
     {
         return TakeDamage(new DamageData(source, amount, damageType, force, dir));
     }
 
+    /// <summary>
+    /// Instantly kills the entity.
+    /// </summary>
+    /// <param name="source">The node responsible for the kill.</param>
     public void Kill(Node source)
     {
         TakeDamage(source, maxHealth);
     }
 
+    /// <summary>
+    /// Heals the entity by a specified amount.
+    /// </summary>
+    /// <param name="amount">Amount of health to restore. Must be greater than 0.</param>
+    /// <param name="instant">If true, heals immediately. If false, starts regeneration after delay.</param>
+    /// <param name="targetRegen">Optional target health for regeneration. Uses DefaultRegenTarget if null.</param>
     public void Heal(float amount, bool instant = true, float? targetRegen = null)
     {
         if (amount <= 0f)
@@ -256,45 +342,99 @@ public partial class HealthComponent : Node
         }
     }
 
+    /// <summary>
+    /// Sets the default target health value for regeneration.
+    /// </summary>
+    /// <param name="value">New default regeneration target.</param>
     public void SetDefaultRegenTarget(float value)
     {
         DefaultRegenTarget = value;
     }
 
+    /// <summary>
+    /// Sets the minimum health threshold. Entity is considered dead when health falls below this value.
+    /// </summary>
+    /// <param name="value">Minimum health value (clamped between 0 and maxHealth - 1).</param>
     public void SetMinHealth(float value)
     {
         MinHealth = Mathf.Clamp(value, 0f, maxHealth - 1f);
     }
 
+    /// <summary>
+    /// Checks if the entity is dead (health at or below MinHealth).
+    /// </summary>
+    /// <returns>True if dead, false otherwise.</returns>
     public bool IsDead()
     {
         return CurrentHealth < MinHealth + 0.001f;
     }
 
+    /// <summary>
+    /// Checks if the entity is currently invincible.
+    /// </summary>
+    /// <returns>True if in invincibility frames, false otherwise.</returns>
     public bool IsInvincible()
     {
         return invincibilityTimer > 0f;
     }
 
+    /// <summary>
+    /// Checks if the entity is at maximum health.
+    /// </summary>
+    /// <returns>True if health equals MaxHealth, false otherwise.</returns>
     public bool IsFullyHealed()
     {
         return CurrentHealth == maxHealth;
     }
 
+    /// <summary>
+    /// Checks if the entity is currently regenerating health.
+    /// </summary>
+    /// <returns>True if regenerating, false otherwise.</returns>
     public bool IsRegenerating()
     {
         return isRegenerating;
     }
 }
 
+/// <summary>
+/// Data structure containing all information about a damage event.
+/// </summary>
 public class DamageData
 {
+    /// <summary>
+    /// Type of damage being dealt.
+    /// </summary>
     public HealthComponent.DamageType DamageType { get; private set; }
+    
+    /// <summary>
+    /// The node that dealt the damage.
+    /// </summary>
     public Node Source { get; private set; }
+    
+    /// <summary>
+    /// Raw damage amount before defense and resistance modifiers.
+    /// </summary>
     public float Damage { get; private set; }
+    
+    /// <summary>
+    /// Knockback force (for use with external knockback systems).
+    /// </summary>
     public float KbForce { get; private set; }
+    
+    /// <summary>
+    /// Direction of the hit. Defaults to Vector2.Up if not specified.
+    /// </summary>
     public Vector2 HitDirection { get; private set; }
 
+    /// <summary>
+    /// Creates a new DamageData instance.
+    /// </summary>
+    /// <param name="source">The node dealing the damage.</param>
+    /// <param name="damage">Raw damage amount.</param>
+    /// <param name="type">Type of damage.</param>
+    /// <param name="kbForce">Knockback force.</param>
+    /// <param name="hitDirection">Direction of the hit (optional, defaults to Vector2.Up).</param>
     public DamageData(Node source, float damage, HealthComponent.DamageType type, float kbForce, Vector2? hitDirection = null)
     {
         Source = source;
@@ -304,4 +444,3 @@ public class DamageData
         HitDirection = hitDirection ?? Vector2.Up;
     }
 }
-
