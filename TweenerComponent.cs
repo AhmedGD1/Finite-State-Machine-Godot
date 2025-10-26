@@ -1,284 +1,203 @@
 using Godot;
 using System;
-using System.Linq;
 using System.Collections.Generic;
-using System.Threading.Tasks;
+using System.Linq;
 
-public class TweenerComponent
+[GlobalClass]
+public partial class TweenerComponent : Node
 {
-   public TweenerComponent(Node owner, Tween.TransitionType trans = Tween.TransitionType.Cubic, Tween.EaseType ease = Tween.EaseType.In)
-   {
-      Owner = owner;
-      defaultTransition = trans;
-      defaultEase = ease;
-   }
+    public event Action<string> TweenFinished;
 
-   public enum LoopMode
-   {
-      None,
-      Linear,
-      PingPong
-   }
+    [Export] private Tween.TransitionType defaultTransition;
+    [Export] private Tween.EaseType defaultEase;
 
-   public Node Owner { get; private set; }
+    [Export] private Godot.Collections.Dictionary<string, Curve> curves = new();
 
-   private Tween.TransitionType defaultTransition;
-   private Tween.EaseType defaultEase;
+    private readonly Dictionary<string, Tween> activeTweens = new();
+    private readonly Dictionary<string, Curve> candidateCurves = new();
 
-   public Dictionary<string, Curve> Curves { get; private set; } = new();
-   public Dictionary<string, List<Tween>> tweenGroups = new();
-   public List<Tween> ActiveTweens { get; private set; } = new();
+    public override void _Ready()
+    {
+        foreach (string tag in curves.Keys)
+            candidateCurves.Add(tag, curves[tag]);
+    }
 
-   public void AddCurveData(string key, Curve curve)
-   {
-      Curves[key] = curve;
-   }
+    public void Animate(GodotObject target, TweenerData data)
+    {
+        if (!CheckErrors(target, data.Property)) return;
 
-   public void StopAllTweens()
-   {
-      // Converted to array to avoid InvalidOperationException if tweens remove themselves in Finished;
-      foreach (Tween tween in ActiveTweens.ToArray())
-         tween.Kill();
-      ActiveTweens.Clear();
-   }
-   public void StopTweensByTag(string tag)
-   {
-      if (!tweenGroups.TryGetValue(tag, out var group))
-         return;
+        if (activeTweens.TryGetValue(data.Tag, out Tween existing))
+            existing.Kill();
 
-      foreach (var tween in group.ToArray())
-         tween.Kill();
-      tweenGroups[tag].Clear();
-   }
+        int count = Mathf.Min(data.Values.Length, data.Durations.Length);
 
-   public void ClearCurves() => Curves.Clear();
+        if (data.Values.Length != data.Durations.Length)
+            GD.PushWarning("Tweener Data values & durations are not equal, some animations will not be shown");
+        
+        Tween tween = CreateTween();
+        tween.SetTrans(data.TransitionType).SetEase(data.EaseType);
+        tween.SetParallel(data.Parallel);
+        tween.SetLoops(data.Loops);
+        
+        if (data.Delay > 0f)
+            tween.TweenInterval(data.Delay);
 
-   public Tween Animate(GodotObject target, string property, Variant[] values, float[] durations, Tween.TransitionType? trans = null, Tween.EaseType? ease = null, Action onFinished = null, LoopMode loopMode = LoopMode.None, string tag = null)
-   {
-      if (target == null) throw new ArgumentNullException(nameof(target));
-      if (values == null) throw new ArgumentNullException(nameof(values));
-      if (values.Length == 0) throw new ArgumentException("Values array cannot be empty");
+        for (int i = 0; i < count; i++)
+            tween.TweenProperty(target, data.Property, data.Values[i], data.Durations[i]);
 
-      Tween tween = Owner.CreateTween();
-      tween.SetTrans(trans ?? defaultTransition);
-      tween.SetEase(ease ?? defaultEase);
+        activeTweens.Add(data.Tag, tween);
+        
+        tween.Finished += () =>
+        {
+            data.OnFinished?.Invoke();
+            TweenFinished?.Invoke(data.Tag);
+            activeTweens.Remove(data.Tag);
+        };
+    }
 
-      int count = Math.Min(values.Length, durations.Length);
+    public void Animate(GodotObject target, string tag, string property, Variant[] values, float[] durations, Tween.TransitionType? trans = null, Tween.EaseType? ease = null, Action onFinished = null)
+    {
+        TweenerData tweenerData = new TweenerData
+        {
+            Tag = tag,
+            Property = property,
+            Values = values,
+            Durations = durations,
+            TransitionType = trans ?? defaultTransition,
+            EaseType = ease ?? defaultEase,
+            OnFinished = onFinished
+        };
 
-      for (int i = 0; i < count; i++)
-         tween.TweenProperty(target, property, values[i], durations[i]);
+        Animate(target, tweenerData);
+    }
 
-      ActiveTweens.Add(tween);
-      
-      if (!string.IsNullOrEmpty(tag))
-      {
-         if (!tweenGroups.ContainsKey(tag)) tweenGroups[tag] = new List<Tween>();
-         tweenGroups[tag].Add(tween);
-      }
+    public void AnimatePath(GodotObject target, string property, string curveName, Variant from, Variant to, float duration = 1f, Action onFinished = null, string tag = null)
+    {
+        if (!CheckErrors(target, property)) return;
 
-      tween.Finished += () =>
-      {
-         ActiveTweens.Remove(tween);
-
-         if (!string.IsNullOrEmpty(tag)) 
-            tweenGroups[tag].Remove(tween);
-
-         onFinished?.Invoke();
-      };
-
-      return tween;
-   }
-
-   public async Task AnimateAsync(GodotObject target, string property, Variant[] values, float[] durations, Tween.TransitionType? trans = null, Tween.EaseType? ease = null)
-   {
-      Tween tween = Animate(target, property, values, durations, trans, ease);
-      await Owner.ToSignal(tween, Tween.SignalName.Finished);
-   }
-
-   public async Task AnimatePathAsync(Node target, string property, string curveName, Variant initialValue, Variant finalValue, float duration = 1f)
-   {
-      Tween tween = AnimatePath(target, property, curveName, initialValue, finalValue, duration);
-      await Owner.ToSignal(tween, Tween.SignalName.Finished);
-   }
-
-   public async Task Sequence(params Func<Task>[] steps)
-   {
-      foreach (var step in steps)
-         await step();
-   }
-
-   public void AnimateData(TweenerData data)
-   {
-      Animate(data.Target, data.Property, data.Values, data.Durations, data.TransitionType, data.EaseType, data.OnFinished);
-   }
-
-   public async Task AnimateDataAsync(TweenerData data)
-   {
-      Tween tween = Animate(data.Target, data.Property, data.Values, data.Durations, data.TransitionType, data.EaseType, data.OnFinished);
-      await Owner.ToSignal(tween, Tween.SignalName.Finished);
-   }
-
-   public Tween AnimatePath(Node target, string property, string curveName, Variant initial, Variant final, float duration = 1f, Action onFinished = null, string tag = null)
-   {
-      Tween tween = Owner.CreateTween();
-
-      if (!Curves.TryGetValue(curveName, out Curve curve))
-      {
-         GD.PushError($"Curve '{curveName}' not found in TweenerComponent.");
-         return null;
-      }
-
-      Callable method = Callable.From<float>(t => Interpolate(t, target, property, curve, initial, final));
-      tween.TweenMethod(method, 0.0f, 1.0f, duration);
-
-      ActiveTweens.Add(tween);
-
-      if (!string.IsNullOrEmpty(tag))
-      {
-         if (!tweenGroups.ContainsKey(tag)) tweenGroups[tag] = new List<Tween>();
-         tweenGroups[tag].Add(tween);
-      }
-
-      tween.Finished += () =>
-      {
-         ActiveTweens.Remove(tween);
-
-         if (!string.IsNullOrEmpty(tag))
-            tweenGroups[tag].Remove(tween);
-
-         onFinished?.Invoke();
-      };
-
-      return tween;
-   }
-
-   public async Task AnimateLoop(GodotObject target, string property, Variant[] values, float[] durations, Tween.TransitionType? trans = null, Tween.EaseType? ease = null, Action onFinished = null, LoopMode loopMode = LoopMode.Linear, int loopCount = -1)
-   {
-      int loopDone = 0;
-      bool pingPong = loopMode == LoopMode.PingPong;
-
-      Variant[] currentValues = values;
-      float[] currentDurations = durations;
-
-      do
-      {
-         await AnimateAsync(target, property, currentValues, currentDurations, trans, ease);
-         onFinished?.Invoke();
-
-         if (pingPong)
-         {
-            currentValues = currentValues.Reverse().ToArray();
-            currentDurations = currentDurations.Reverse().ToArray();
-         }
-
-         loopDone++;
-      }
-      while (loopMode != LoopMode.None && (loopCount < 0 || loopDone < loopCount));
-   }
-
-   public async Task AnimatePathLoop(Node target, string property, string curveName, Variant initialValue, Variant finalValue, float duration = 1f, Action onFinished = null, LoopMode loopMode = LoopMode.None, int loopCount = -1) 
-   { 
-      int loopDone = 0; 
-      bool pingPong = loopMode == LoopMode.PingPong; 
-
-      Variant currentInitialValue = initialValue; 
-      Variant currentFinalValue = finalValue; 
-      
-      do 
-      { 
-         await AnimatePathAsync(target, property, curveName, currentInitialValue, currentFinalValue, duration); 
-         onFinished?.Invoke(); 
-         
-         if (pingPong) 
-         {
-            currentFinalValue = initialValue; 
-            currentInitialValue = finalValue; 
-         } 
-
-         loopDone++; 
-      } 
-      while (loopMode != LoopMode.None && (loopCount < 0 || loopDone < loopCount)); 
-   }
-
-   private void Interpolate(float t, Node target, string property, Curve curve, Variant a, Variant b)
-   {
-      if (target == null || !GodotObject.IsInstanceValid(target))
-      {
-         GD.PushWarning($"Target node for property '{property}' has been freed during animation");
-         return;
-      }
-
-      if (curve == null)
-      {
-         GD.PushError("Curve is null during interpolation");
-         return;
-      }
-
-      float sample = curve.Sample(t);
-      Variant result;
-
-      switch (a.VariantType)
-      {
-         case Variant.Type.Float:
-            result = (float)a + (((float)b - (float)a) * sample);
-            break;
-
-         case Variant.Type.Vector2:
-            result = (Vector2)a + (((Vector2)b - (Vector2)a) * sample);
-            break;
-
-         case Variant.Type.Vector3:
-            result = (Vector3)a + (((Vector3)b - (Vector3)a) * sample);
-            break;
-
-         case Variant.Type.Color:
-            result = (Color)a + (((Color)b - (Color)a) * sample);
-            break;
-
-         case Variant.Type.Quaternion:
-            result = (Quaternion)a + (((Quaternion)b - (Quaternion)a) * sample);
-            break;
-
-         default:
-            GD.PushError($"Unsupported type {a.VariantType} for interpolation.");
+        if (!candidateCurves.TryGetValue(curveName, out Curve curve))
+        {
+            GD.PushError($"Curve '{curveName}' not found");
             return;
-      }
+        }
 
-      target.Set(property, result);
-   }
+        string tweenTag = tag ?? curveName;
 
-   public class TweenerData
-   {
-      public Tween.TransitionType TransitionType { get; private set; }
-      public Tween.EaseType EaseType { get; private set; }
+        if (activeTweens.TryGetValue(tweenTag, out Tween existing))
+            existing.Kill();
 
-      public GodotObject Target { get; private set; }
-      public string Property { get; private set; }
+        Tween tween = CreateTween();
+        Callable callable = Callable.From<float>(t => Interpolate(t, target, property, curve, from, to));
 
-      public Variant[] Values { get; private set; }
-      public float[] Durations { get; private set; }
+        tween.TweenMethod(callable, 0f, 1f, duration);
+        activeTweens.Add(tweenTag, tween);
 
-      public Action OnFinished { get; private set; }
+        tween.Finished += () =>
+        {
+            onFinished?.Invoke();
+            TweenFinished?.Invoke(tweenTag);
+            activeTweens.Remove(tweenTag);
+        };
+    }
 
-      public TweenerData SetTrans(Tween.TransitionType type)
-      {
-         TransitionType = type;
-         return this;
-      }
+    public void StopTween(string tag, bool emitFinished = false)
+    {
+        if (activeTweens.TryGetValue(tag, out Tween tween))
+        {
+            tween.Kill();
+            activeTweens.Remove(tag);
+            if (emitFinished)
+                TweenFinished?.Invoke(tag);   
+        }
+    }
 
-      public TweenerData SetEase(Tween.EaseType type)
-      {
-         EaseType = type;
-         return this;
-      }
+    public void StopAll(bool emitFinished = false) 
+    {
+        foreach (var tag in activeTweens.Keys.ToList())
+            StopTween(tag, emitFinished);
+    }
 
-      public TweenerData(Node target, string property, Variant[] values, float[] durations, Action onFinished = null)
-      {
-         Target = target;
-         Property = property;
-         Values = values;
-         Durations = durations;
-         OnFinished = onFinished;
-      }
-   }
+    public Tween GetActiveTween(string tag)
+    {
+        CleanupExpiredTweens();
+        return activeTweens.TryGetValue(tag, out Tween result) ? result : null;
+    }
+
+    public bool HasActiveTween(string tag)
+    {
+        CleanupExpiredTweens();
+        return activeTweens.ContainsKey(tag);
+    }
+
+    public int GetActiveTweenCount()
+    {
+        CleanupExpiredTweens();
+        return activeTweens.Count;
+    }
+
+    private void Interpolate(float t, GodotObject target, string property, Curve curve, Variant a, Variant b)
+    {
+        float sample = curve.Sample(t);
+        
+        Variant result = a.VariantType switch
+        {
+            Variant.Type.Float => Mathf.Lerp((float)a, (float)b, sample),
+            Variant.Type.Vector2 => ((Vector2)a).Lerp((Vector2)b, sample),
+            Variant.Type.Vector3 => ((Vector3)a).Lerp((Vector3)b, sample),
+            Variant.Type.Color => ((Color)a).Lerp((Color)b, sample),
+            Variant.Type.Quaternion => ((Quaternion)a).Slerp((Quaternion)b, sample),
+            _ => throw new ArgumentException($"Unsupported type {a.VariantType} for interpolation.")
+        };
+
+        target.Set(property, result);
+    }
+
+    private bool CheckErrors(GodotObject target, string property)
+    {
+        if (target == null)
+        {
+            GD.PushError("Trying to reach a null value, (Tween Target)");
+            return false;
+        }
+        
+        try
+        {
+            target.Get(property);
+            return true;
+        }
+        catch
+        {
+            GD.PushError($"Property '{property}' does not exist on {target.GetClass()}");
+            return false;
+        }
+    }
+
+    private void CleanupExpiredTweens()
+    {
+        if (activeTweens.Count == 0) return;
+        
+        var expiredKeys = activeTweens
+            .Where(kvp => !IsInstanceValid(kvp.Value))
+            .Select(kvp => kvp.Key)
+            .ToList();
+        
+        foreach (var key in expiredKeys)
+            activeTweens.Remove(key);
+    }
 }
+
+public class TweenerData
+{
+    public string Tag { get; set; }
+    public string Property { get; set; }
+    public Variant[] Values { get; set; }
+    public float[] Durations { get; set; }
+    public Tween.TransitionType TransitionType { get; set; }
+    public Tween.EaseType EaseType { get; set; }
+    public Action OnFinished { get; set; }
+
+    public float Delay { get; set; } = 0f;
+    public int Loops { get; set; } = 1;
+    public bool Parallel { get; set; } = false;
+}
+
