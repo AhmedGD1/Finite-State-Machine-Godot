@@ -1,138 +1,98 @@
 using Godot;
 using System;
 using System.Collections.Generic;
-using System.Linq;
 
-[GlobalClass]
-public partial class TweenerComponent : Node
+public class TweenerComponent
 {
-    public event Action<string> TweenFinished;
+    private const string DefaultGroup = "Generic";
 
-    [Export] private Tween.TransitionType defaultTransition;
-    [Export] private Tween.EaseType defaultEase;
+    public Node Owner { get; private set; }
 
-    [Export] private Godot.Collections.Dictionary<string, Curve> curves = new();
+    private readonly Dictionary<string, Curve> curves = new();
+    private readonly Dictionary<string, List<Tween>> tweenGroups = new();
 
-    private readonly Dictionary<string, Tween> activeTweens = new();
-    private readonly Dictionary<string, Curve> candidateCurves = new();
+    private Tween.TransitionType defaultTransition;
+    private Tween.EaseType defaultEase;
 
-    public override void _Ready()
+    public TweenerComponent(Node owner, Tween.TransitionType? transitionType = null, Tween.EaseType? easeType = null)
     {
-        foreach (string tag in curves.Keys)
-            candidateCurves.Add(tag, curves[tag]);
+        Owner = owner;
+        defaultTransition = transitionType ?? Tween.TransitionType.Cubic;
+        defaultEase = easeType ?? Tween.EaseType.In;
+    }
+
+    public void AddCurve(string key, Curve curve)
+    {
+        curves[key] = curve;
     }
 
     public void Animate(GodotObject target, TweenerData data)
     {
-        if (!CheckErrors(target, data.Property)) return;
-
-        if (activeTweens.TryGetValue(data.Tag, out Tween existing))
-            existing.Kill();
-
         int count = Mathf.Min(data.Values.Length, data.Durations.Length);
 
-        if (data.Values.Length != data.Durations.Length)
-            GD.PushWarning("Tweener Data values & durations are not equal, some animations will not be shown");
-        
-        Tween tween = CreateTween();
+        Tween tween = Owner.CreateTween();
         tween.SetTrans(data.TransitionType).SetEase(data.EaseType);
-        tween.SetParallel(data.Parallel);
         tween.SetLoops(data.Loops);
-        
-        if (data.Delay > 0f)
-            tween.TweenInterval(data.Delay);
+        tween.SetParallel(data.Parallel);
+
+        AddTweenToGroup(data.Group, tween);
 
         for (int i = 0; i < count; i++)
             tween.TweenProperty(target, data.Property, data.Values[i], data.Durations[i]);
-
-        activeTweens.Add(data.Tag, tween);
         
         tween.Finished += () =>
         {
             data.OnFinished?.Invoke();
-            TweenFinished?.Invoke(data.Tag);
-            activeTweens.Remove(data.Tag);
+            tweenGroups[data.Group].Remove(tween);
         };
     }
 
-    public void Animate(GodotObject target, string tag, string property, Variant[] values, float[] durations, Tween.TransitionType? trans = null, Tween.EaseType? ease = null, Action onFinished = null)
+    public void Animate(GodotObject target, string property, Variant[] values, float[] durations, Tween.TransitionType? transition = null, Tween.EaseType? ease = null, Action onFinished = null, string group = DefaultGroup)
     {
-        TweenerData tweenerData = new TweenerData
+        TweenerData data = new TweenerData
         {
-            Tag = tag,
+            Group = group,
             Property = property,
             Values = values,
             Durations = durations,
-            TransitionType = trans ?? defaultTransition,
+            TransitionType = transition ?? defaultTransition,
             EaseType = ease ?? defaultEase,
             OnFinished = onFinished
         };
 
-        Animate(target, tweenerData);
+        Animate(target, data);
     }
 
-    public void AnimatePath(GodotObject target, string property, string curveName, Variant from, Variant to, float duration = 1f, Action onFinished = null, string tag = null)
+    public void AnimatePath(GodotObject target, string property, string curveKey, Variant from, Variant to, float duration = 1f, Action onFinished = null, string group = DefaultGroup)
     {
-        if (!CheckErrors(target, property)) return;
+        Curve curve = curves[curveKey];
+        Tween tween = Owner.CreateTween();
+        
+        AddTweenToGroup(group, tween);
 
-        if (!candidateCurves.TryGetValue(curveName, out Curve curve))
-        {
-            GD.PushError($"Curve '{curveName}' not found");
-            return;
-        }
-
-        string tweenTag = tag ?? curveName;
-
-        if (activeTweens.TryGetValue(tweenTag, out Tween existing))
-            existing.Kill();
-
-        Tween tween = CreateTween();
         Callable callable = Callable.From<float>(t => Interpolate(t, target, property, curve, from, to));
-
         tween.TweenMethod(callable, 0f, 1f, duration);
-        activeTweens.Add(tweenTag, tween);
 
         tween.Finished += () =>
         {
             onFinished?.Invoke();
-            TweenFinished?.Invoke(tweenTag);
-            activeTweens.Remove(tweenTag);
+            tweenGroups[group].Remove(tween);
         };
     }
 
-    public void StopTween(string tag, bool emitFinished = false)
+    public void StopTweens(string group)
     {
-        if (activeTweens.TryGetValue(tag, out Tween tween))
-        {
+        List<Tween> tweens = tweenGroups[group];
+
+        foreach (Tween tween in tweens)
             tween.Kill();
-            activeTweens.Remove(tag);
-            if (emitFinished)
-                TweenFinished?.Invoke(tag);   
-        }
     }
 
-    public void StopAll(bool emitFinished = false) 
+    public void StopAll()
     {
-        foreach (var tag in activeTweens.Keys.ToList())
-            StopTween(tag, emitFinished);
-    }
-
-    public Tween GetActiveTween(string tag)
-    {
-        CleanupExpiredTweens();
-        return activeTweens.TryGetValue(tag, out Tween result) ? result : null;
-    }
-
-    public bool HasActiveTween(string tag)
-    {
-        CleanupExpiredTweens();
-        return activeTweens.ContainsKey(tag);
-    }
-
-    public int GetActiveTweenCount()
-    {
-        CleanupExpiredTweens();
-        return activeTweens.Count;
+        foreach (List<Tween> list in tweenGroups.Values)
+            foreach (Tween tween in list)
+                tween.Kill();
     }
 
     private void Interpolate(float t, GodotObject target, string property, Curve curve, Variant a, Variant b)
@@ -152,52 +112,27 @@ public partial class TweenerComponent : Node
         target.Set(property, result);
     }
 
-    private bool CheckErrors(GodotObject target, string property)
+    private void AddTweenToGroup(string group, Tween tween)
     {
-        if (target == null)
-        {
-            GD.PushError("Trying to reach a null value, (Tween Target)");
-            return false;
-        }
-        
-        try
-        {
-            target.Get(property);
-            return true;
-        }
-        catch
-        {
-            GD.PushError($"Property '{property}' does not exist on {target.GetClass()}");
-            return false;
-        }
-    }
-
-    private void CleanupExpiredTweens()
-    {
-        if (activeTweens.Count == 0) return;
-        
-        var expiredKeys = activeTweens
-            .Where(kvp => !IsInstanceValid(kvp.Value))
-            .Select(kvp => kvp.Key)
-            .ToList();
-        
-        foreach (var key in expiredKeys)
-            activeTweens.Remove(key);
+        if (tweenGroups.TryGetValue(group, out List<Tween> list))
+            list.Add(tween);
+        else
+            tweenGroups.Add(group, [tween]);
     }
 }
 
 public class TweenerData
 {
-    public string Tag { get; set; }
+    public string Group { get; set; }
     public string Property { get; set; }
     public Variant[] Values { get; set; }
     public float[] Durations { get; set; }
     public Tween.TransitionType TransitionType { get; set; }
     public Tween.EaseType EaseType { get; set; }
-    public Action OnFinished { get; set; }
 
     public float Delay { get; set; } = 0f;
     public int Loops { get; set; } = 1;
     public bool Parallel { get; set; } = false;
-}
 
+    public Action OnFinished { get; set; }
+}
