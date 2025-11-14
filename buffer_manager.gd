@@ -1,42 +1,42 @@
 class_name BufferManager
 
-var _buffers: Array[InputBuffer] = []
+var buffers: Array[InputBuffer] = []
 
 func buffer_action(action: String, duration: float) -> void:
-	var buffer: InputBuffer = InputBuffer.new(action, duration)
-	_buffers.append(buffer)
-
-func has_buffer(action: String) -> bool:
-	return _buffers.any(func(b: InputBuffer): b.action == action && b.is_valid())
-
-func consume(action: String) -> void:
-	var index: int = _buffers.find_custom(func(b: InputBuffer): b.action == action && b.is_valid())
-	if index == -1:
+	var index: int = buffers.find_custom(func(b: InputBuffer) -> bool: return b.action == action)
+	
+	if index != -1: # buffer with this action does exist
+		buffers[index].expire_time = duration
 		return
-	_buffers.remove_at(index)
+	var input_buffer: InputBuffer = InputBuffer.new(action, duration)
+	buffers.append(input_buffer)
+
+func has_action(action: String) -> bool:
+	return buffers.any(func(b: InputBuffer) -> bool: return b.action == action && b.is_valid)
 
 func try_consume(action: String) -> bool:
-	var index: int = _buffers.find_custom(func(b: InputBuffer): b.action == action && b.is_valid())
-	if index == -1: 
+	var index: int = buffers.find_custom(func(b: InputBuffer) -> bool: return b.action == action && b.is_valid)
+	if index == -1:
 		return false
-	_buffers.remove_at(index)
+	buffers.remove_at(index)
 	return true
 
 func update(delta: float) -> void:
-	for buffer: InputBuffer in _buffers:
-		buffer.update(delta)
-	_buffers = _buffers.filter(func(b: InputBuffer): b.is_valid())
+	for i in range(buffers.size() - 1, -1, -1):
+		buffers[i].update(delta)
+		if !buffers[i].is_valid:
+			buffers.remove_at(i)
 
 class InputBuffer:
 	var action: String
-	var _expire_time: float
+	var expire_time: float
+	
+	var is_valid: bool:
+		get: return expire_time > 0.0
 	
 	func update(delta: float) -> void:
-		_expire_time -= delta
+		expire_time -= delta
 	
-	func is_valid() -> bool:
-		return _expire_time > 0.0
-	
-	func _init(new_action: String, duration: float) -> void:
-		action = new_action
-		_expire_time = duration
+	func _init(action_key: String, duration: float) -> void:
+		action = action_key
+		expire_time = duration
