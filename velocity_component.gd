@@ -2,213 +2,265 @@ class_name VelocityComponent
 extends Node
 
 signal landed()
+signal jumped()
 signal left_ground()
+signal started_falling()
 signal max_height_reached()
+signal multiple_jump_performed(index: int)
+signal motion_mode_switched(mode: CharacterBody2D.MotionMode)
 
-const JUMP_BUFFER_TIME: float = 0.15
 const COYOTE_TIME: float = 0.15
+const JUMP_BUFFERING_TIME: float = 0.15
+const MOVEMENT_THRESHOLD: float = 0.01
+## player has only 0.6s to be able to jump in air, if he started to fall
+## if this cooldown ended, player will not be able to perform any multiple jumps
+const MULTIPLE_JUMP_COOLDOWN: float = 0.6 
 
-@export_range(1.0, 999.0) var max_speed: float = 100.0
-@export_range(1.0, 99.0) var acceleration: float = 20.0
-@export_range(1.0, 99.0) var deceleration: float = 25.0
+@export_range(0.5, 100) var mass: float = 1.0
+@export_range(10, 1000) var max_speed: float = 100.0
 
 @export var use_gravity: bool = true
 
-@export_group("Platformer Settings")
-@export_range(1.0, 99.0) var air_acceleration: float = 5.0
-@export_range(1.0, 99.0) var air_deceleration: float = 5.0
+@export_group("Control")
+@export_range(1, 100) var acceleration: float = 30.0
+@export_range(1, 100) var deceleration: float = 40.0
 
-@export_subgroup("Jump height & Apex time")
-@export_range(5.0, 999.0) var jump_height: float = 30.0
-@export_range(0.05, 9.0) var time_to_apex: float = 0.3
+@export_subgroup("Air Control")
+@export_range(0.05, 100) var air_acceleration: float = 10.0
+@export_range(0.05, 100) var air_deceleration: float = 10.0
 
-@export_subgroup("Gravity Settings")
-@export_range(100.0, 999.0) var max_fall_speed: float = 500.0
-@export_range(1.0, 9.0) var fall_multiplier: float = 1.0
-@export_range(0.1, 9.0) var gravity_scale: float = 1.0
+@export_group("Gravity & Jump")
+@export_range(1, 10) var max_jumps: int = 1
+@export_range(5, 500) var jump_height: float = 40.0
+@export_range(0.05, 1.0) var time_to_apex: float = 0.3
+@export_range(0.1, 10) var gravity_scale: float = 1.0
 
-@export_subgroup("Wall Collide Settings")
-@export var wall_detectors: Array[RayCast2D] = []
+@export_group("Factors")
+@export_range(1.0, 2.0) var fall_gravity_multiplier: float = 1.0
+@export_range(0.05, 0.9) var jump_resistance: float = 0.4
+@export_range(50, 1000) var max_fall_speed: float = 300.0
+
+@export_group("Custom Ground Check")
+@export var ground_check: RayCast2D
 
 @onready var controller: CharacterBody2D = get_owner()
-@onready var is_floating_mode: bool = controller.motion_mode == CharacterBody2D.MotionMode.MOTION_MODE_FLOATING
+
+@onready var _jumps_left: int = max_jumps
+@onready var _is_floating_mode: bool = controller.motion_mode == \
+	CharacterBody2D.MotionMode.MOTION_MODE_FLOATING
+
+var _gravity: float:
+	get: return _calculate_gravity(jump_height, time_to_apex)
+
+var _jump_velocity: float:
+	get: return _calculate_jump_velocity(_gravity)
 
 var velocity: Vector2:
 	get: return controller.velocity
 	set(value): controller.velocity = value
 
-var gravity: float:
-	get: return _calculate_gravity(jump_height, time_to_apex)
+var vertical_speed: float:
+	get: return velocity.dot(controller.up_direction)
 
-var jump_velocity: float:
-	get: return _calculate_jump_velocity(gravity)
+var is_falling: bool:
+	get: return vertical_speed < 0.0
 
-var _start_timer: bool
-var _timer: float
-var _jumped_this_frame: bool
+var velocity_length: float:
+	get: return velocity.length()
 
-var _jump_buffer_timer: float
-var _coyote_timer: float
-
-var is_grounded: bool
 var was_grounded: bool
+var is_grounded: bool
 
-var is_on_wall: bool
+var _jumped_this_frame: bool
+var _started_to_fall: bool
+var _max_height_fired: bool
 
-var jump_resistor_factor: float = 0.2
+var _coyote_timer: float
+var _jump_buffering_timer: float
+var _max_height_timer: float
+var _multiple_jump_cooldown_timer: float
 
 func _physics_process(delta: float) -> void:
 	_update_timers(delta)
-	_apply_gravity(delta, use_gravity)
-	
+	_apply_gravity(delta)
+	_update_floor_info()
 	controller.move_and_slide()
-	
-	_update_grounded_info() # includes move and slide method
-	_update_max_height_info(delta)
-	_update_wall_info()
+	_check_falling()
 	
 	_jumped_this_frame = false
 
-func _update_grounded_info() -> void:
+func _update_floor_info() -> void:
 	was_grounded = is_grounded
-	is_grounded = controller.is_on_floor()
+	is_grounded = ground_check.is_colliding() if is_instance_valid(ground_check) else controller.is_on_floor()
 	
 	if was_grounded && !is_grounded:
 		left_ground.emit()
 		
-		if !_jumped_this_frame:
+		if !_jumped_this_frame && vertical_speed <= 0.0:
 			start_coyote()
 	
 	if !was_grounded && is_grounded:
+		reset_jumps()
 		landed.emit()
-
-func _update_max_height_info(delta: float) -> void:
-	if !_start_timer:
-		return
-	
-	_timer += delta
-	var stop: bool = is_grounded || _timer >= time_to_apex
-	
-	if stop:
-		_start_timer = false
-		
-		if _timer >= time_to_apex:
-			max_height_reached.emit()
-		_timer = 0.0
-
-func _update_wall_info() -> void:
-	if wall_detectors.is_empty():
-		is_on_wall = controller.is_on_wall()
-		return
-	
-	is_on_wall = wall_detectors.any(func(r: RayCast2D): r.is_colliding())
+		_max_height_fired = false
 
 func _update_timers(delta: float) -> void:
-	if _coyote_timer > 0:
-		_coyote_timer -= delta
-	if _jump_buffer_timer > 0:
-		_jump_buffer_timer -= delta
+	if is_grounded:
+		_reset_timers()
+	
+	_coyote_timer = _reduce_time(_coyote_timer, delta)
+	_jump_buffering_timer = _reduce_time(_jump_buffering_timer, delta)
+	_max_height_timer = _reduce_time(_max_height_timer, delta)
+	_multiple_jump_cooldown_timer = _reduce_time(_multiple_jump_cooldown_timer, delta)
+	
+	if _max_height_timer <= 0.0 && !is_grounded && !_max_height_fired:
+		max_height_reached.emit()
+		_max_height_fired = true
+		
+		_multiple_jump_cooldown_timer = MULTIPLE_JUMP_COOLDOWN
 
-func accelerate(direction: Vector2, delta: float, custom_speed: float = -1) -> void:
-	var applied_speed: float = max_speed if custom_speed == -1 else custom_speed
-	var applied_accel: float = acceleration if is_floating_mode || is_grounded else air_acceleration
+func _reduce_time(timer: float, delta: float) -> float:
+	return max(0.0, timer - delta)
+
+func _check_falling() -> void:
+	if is_grounded:
+		_started_to_fall = false
+		return
+	
+	if is_falling && !_started_to_fall:
+		_started_to_fall = true
+		started_falling.emit()
+
+func _apply_gravity(delta: float) -> void:
+	if is_grounded || _is_floating_mode || !use_gravity:
+		return
+	var gravity: float = _gravity * (fall_gravity_multiplier if is_falling else 1.0)
+	velocity += gravity * delta * (-controller.up_direction)
+	
+	if is_falling && vertical_speed < -max_fall_speed:
+		var clamped: float = max(vertical_speed, -max_fall_speed)
+		velocity += (clamped - vertical_speed) * controller.up_direction
+
+func add_impulse(value: Vector2) -> void:
+	velocity += value / mass
+
+func add_force(value: Vector2, delta: float) -> void:
+	velocity += (value / mass) * delta
+
+func accelerate(direction: Vector2, delta: float, speed: float = -1.0, weight: float = -1.0) -> void:
+	var applied_speed: float = speed if speed > 0.0 else max_speed
+	var accel: float = acceleration if _is_floating_mode || is_grounded else air_acceleration
+	var applied_accel: float = weight if weight > 0.0 else accel
 	var smoothing: float = _exponential_smoothing(applied_accel, delta)
 	var desired: Vector2 = direction.normalized() * applied_speed
 	
-	if is_floating_mode:
-		velocity.y = lerp(velocity.y, desired.y, smoothing)
 	velocity.x = lerp(velocity.x, desired.x, smoothing)
+	if _is_floating_mode:
+		velocity.y = lerp(velocity.y, desired.y, smoothing)
 
-func decelerate(delta: float) -> void:
-	var applied_decel: float = deceleration if is_floating_mode || is_grounded else air_deceleration
-	var smoothing: float = _exponential_smoothing(applied_decel, delta)
+func decelerate(delta: float, weight: float = -1.0) -> void:
+	var decel: float = deceleration if _is_floating_mode || is_grounded else air_deceleration
+	var applied_weight: float = weight if weight > 0.0 else decel
+	var smoothing: float = _exponential_smoothing(applied_weight, delta)
 	
-	if is_floating_mode:
-		velocity.y = lerp(velocity.y, 0.0, smoothing)
 	velocity.x = lerp(velocity.x, 0.0, smoothing)
+	if _is_floating_mode:
+		velocity.y = lerp(velocity.y, 0.0, smoothing)
 
-func apply_impulse(value: Vector2) -> void:
-	velocity += value
+func apply_jump_resistance(value: float = -1.0) -> void:
+	var applied_value: float = value if value > 0.0 else jump_resistance
+	if vertical_speed > 0:
+		velocity.y *= applied_value
 
-func apply_force(value: Vector2, delta: float) -> void:
-	velocity += value * delta
-
-func force_stop() -> void:
-	velocity = Vector2.ZERO
-
-func apply_jump_resistor(value: float = -1) -> void:
-	var applied_value: float = jump_resistor_factor if value == -1 else value
-	velocity.y = lerp(velocity.y, 0.0, applied_value)
-
-func can_jump(jump_pressed: bool = true, ignore_floor: bool = false) -> bool:
-	var condition: bool = is_grounded if !ignore_floor else true
-	return (has_coyote() || condition) && (jump_pressed || has_buffered_jump())
-
-func try_consume_jump(jump_pressed: bool, ignore_floor: bool = false) -> bool:
-	if !can_jump(jump_pressed, ignore_floor):
-		return false
+func jump() -> void:
+	if _is_floating_mode:
+		return
+	velocity -= vertical_speed * controller.up_direction
+	velocity += _jump_velocity * controller.up_direction
 	
-	consume_buffered_jump()
+	jumped.emit()
+	# is performing more jumps;
+	if _jumps_left < max_jumps:
+		multiple_jump_performed.emit(max_jumps - _jumps_left)
+	
+	_max_height_timer = time_to_apex
+	_jumps_left = max(0, _jumps_left - 1)
+	
+	_max_height_fired = false
+	_jumped_this_frame = true
+
+func can_jump(jump_condition: bool, ignore_floor: bool = false) -> bool:
+	var has_more_jumps: bool = can_perform_extra_jump() && _multiple_jump_cooldown_timer > 0.0
+	var is_on_floor: bool = is_grounded || ignore_floor
+	return (is_on_floor || has_coyote() || has_more_jumps) && (jump_condition || has_buffered_jump())
+
+func try_consume_jump(jump_condition: bool, ignore_floor: bool = false) -> bool:
+	if !can_jump(jump_condition, ignore_floor):
+		return false
 	consume_coyote()
+	consume_buffered_jump()
 	jump()
 	return true
 
-func jump() -> void:
-	velocity.y = -abs(jump_velocity) * sign(controller.up_direction.y)
-	_start_timer = true
-	_jumped_this_frame = true
+#region Coyote & Jump Buffers
+func start_coyote(duration: float = COYOTE_TIME) -> void:
+	_coyote_timer = duration
 
-func is_falling(epsilon: float = 0.01) -> bool:
-	return velocity.dot(controller.up_direction) < -epsilon
-
-func is_on_wall_with_name(wall_name: String) -> bool:
-	return !wall_detectors.is_empty() && wall_detectors.any(func(r: RayCast2D): r.is_colliding() && r.name == wall_name)
-
-func _apply_gravity(delta: float, condition: bool = true) -> void:
-	if !condition || is_grounded:
-		return
-	velocity += controller.up_direction * _get_gravity_internal() * delta
-	
-	var down = sign(controller.up_direction.y)
-	var max_down = max_fall_speed * down
-	var max_up = -max_down
-	velocity.y = clamp(velocity.y, max_up, max_down)
-
-func start_coyote() -> void:
-	_coyote_timer = COYOTE_TIME
+func buffer_jump(duration: float = JUMP_BUFFERING_TIME) -> void:
+	_jump_buffering_timer = duration
 
 func has_coyote() -> bool:
 	return _coyote_timer > 0.0
 
+func has_buffered_jump() -> bool:
+	return _jump_buffering_timer > 0.0
+
 func consume_coyote() -> void:
 	_coyote_timer = 0.0
 
-func buffer_jump() -> void:
-	_jump_buffer_timer = JUMP_BUFFER_TIME
-
-func has_buffered_jump() -> bool:
-	return _jump_buffer_timer > 0.0
-
 func consume_buffered_jump() -> void:
-	_jump_buffer_timer = 0.0
+	_jump_buffering_timer = 0.0
+#endregion
 
-func _get_gravity_internal() -> float:
-	if velocity.dot(controller.up_direction) > 0:
-		return gravity
-	return gravity * fall_multiplier
+#region Helper Methods
+func set_motion_mode(mode: CharacterBody2D.MotionMode) -> void:
+	controller.motion_mode = mode
+	_is_floating_mode = mode == CharacterBody2D.MotionMode.MOTION_MODE_FLOATING
+	
+	motion_mode_switched.emit(mode)
+
+func is_moving_horizontally() -> bool:
+	var right_direction: Vector2 = controller.up_direction.rotated(-PI / 2)
+	var horizontal_speed: float = abs(velocity.dot(right_direction))
+	return horizontal_speed > MOVEMENT_THRESHOLD && abs(vertical_speed) < MOVEMENT_THRESHOLD
+
+func can_perform_extra_jump() -> bool:
+	return _jumps_left > 0 && _jumps_left < max_jumps && is_falling
+
+func reset_jumps() -> void:
+	_jumps_left = max_jumps
+
+func flip_gravity() -> void:
+	controller.up_direction *= -1
+
+func set_up_direction(value: Vector2) -> void:
+	controller.up_direction = value.normalized()
+#endregion
 
 func _exponential_smoothing(value: float, delta: float) -> float:
 	return 1.0 - exp(-value * delta)
 
-func _calculate_jump_velocity(grav: float) -> float:
-	return sqrt(2.0 * grav * jump_height)
+func _calculate_jump_velocity(gravity: float) -> float:
+	return sqrt(2.0 * gravity * jump_height)
 
 func _calculate_gravity(height: float, time: float) -> float:
-	var formula: float = 2.0 * height / (time * time)
-	return formula * gravity_scale
+	var new_gravity: float = 2.0 * height / (time * time)
+	return new_gravity * gravity_scale
 
-
-
-
+func _reset_timers() -> void:
+	_coyote_timer = 0.0
+	_jump_buffering_timer = 0.0
+	_max_height_timer = 0.0
+	_multiple_jump_cooldown_timer = 0.0
 
 
