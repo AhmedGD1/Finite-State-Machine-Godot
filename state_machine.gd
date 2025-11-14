@@ -39,8 +39,8 @@ signal state_timeout(from: int)
 
 ## Determines which process function the state uses for updates.
 enum ProcessType { 
-	Process,         ## Uses _process (frame-based)
-	PhysicsProcess   ## Uses _physics_process (fixed timestep)
+	Idle,         ## Uses _process (frame-based)
+	Physics   ## Uses _physics_process (fixed timestep)
 }
 
 ## Controls what operations are blocked in a locked state.
@@ -111,7 +111,7 @@ func _init(sm_enum: Dictionary) -> void:
 ## @param timeout: If > 0, automatically transitions to restart_id after this many seconds
 ## @param process_type: Whether to use Process or PhysicsProcess for updates
 ## @return: The created State object for further configuration (chaining)
-func add_state(id: int, update: Callable = Callable(), enter: Callable = Callable(), exit: Callable = Callable(), min_time: float = 0, timeout: float = -1, process_type: ProcessType = ProcessType.PhysicsProcess) -> State:
+func add_state(id: int, update: Callable = Callable(), enter: Callable = Callable(), exit: Callable = Callable(), min_time: float = 0, timeout: float = -1, process_type: ProcessType = ProcessType.Physics) -> State:
 	if states.has(id):
 		push_error("Trying to store an existent state %s" % id)
 		return null
@@ -188,9 +188,12 @@ func set_initial_state(id: int) -> void:
 ##
 ## @param ignore_enter: If true, skips calling the enter callback
 ## @param ignore_exit: If true, skips calling the exit callback
-func restart_current_state(ignore_enter: bool = false, ignore_exit: bool = false) -> void:
+func restart_current_state(ignore_enter: bool = false, ignore_exit: bool = false, respect_min_time: bool = false) -> void:
 	if current_state == null:
 		push_warning("Trying to access a non-existent state")
+		return
+	
+	if respect_min_time && state_time < current_state.min_time:
 		return
 	state_time = 0.0
 	
@@ -485,7 +488,7 @@ func _check_transition_loop(candidate_transitions: Array[Transition]) -> void:
 	for transition: Transition in candidate_transitions:
 		var required_time: float = transition.override_min_time if transition.override_min_time > 0.0 else current_state.min_time
 		var time_requirement_met: bool = transition.force_instant_transition || state_time >= required_time
-	
+		
 		if time_requirement_met && transition.condition.call():
 			_change_state_internal(transition.to)
 			transition_triggered.emit(transition.from, transition.to)
@@ -564,6 +567,9 @@ func get_previous_state_id() -> int:
 ## @return: State time in seconds
 func get_state_time() -> float:
 	return state_time
+
+func min_time_exceeded() -> bool:
+	return current_state != null && state_time > current_state.min_time
 
 ## Gets the minimum time requirement of the current state.
 ##
@@ -1152,7 +1158,7 @@ class AnimatedSprite2DAdapter:
 		sprite.play(anim_name)
 		sprite.sprite_frames.set_animation_loop(anim_name, loop)
 		
-		if on_finished != null:
+		if on_finished.is_valid():
 			finish_callbacks[anim_name] = on_finished
 	
 	## Internal signal handler for animation finished events.
