@@ -117,7 +117,7 @@ func _update_timers(delta: float) -> void:
 		max_height_reached.emit()
 		_max_height_fired = true
 		
-		_multiple_jump_cooldown_timer = MULTIPLE_JUMP_COOLDOWN
+		_start_multiple_jump_cooldown()
 
 func _reduce_time(timer: float, delta: float) -> float:
 	return max(0.0, timer - delta)
@@ -263,4 +263,6 @@ func _reset_timers() -> void:
 	_max_height_timer = 0.0
 	_multiple_jump_cooldown_timer = 0.0
 
+func _start_multiple_jump_cooldown() -> void:
+	_multiple_jump_cooldown_timer = MULTIPLE_JUMP_COOLDOWN
 
