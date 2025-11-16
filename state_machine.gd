@@ -413,7 +413,7 @@ func remove_transition(from: int, to: int) -> bool:
 		return false
 	
 	var original_size = transitions[from].size()
-	transitions[from] = transitions[from].filter(func(t: Transition): t.to != to)
+	transitions[from] = transitions[from].filter(func(t: Transition): return t.to != to)
 	
 	if transitions[from].is_empty():
 		transitions.erase(from)
@@ -430,7 +430,7 @@ func remove_transition(from: int, to: int) -> bool:
 func remove_global_transition(to: int) -> bool:
 	# if has any global transition
 	var original_size: int = global_transitions.size()
-	global_transitions = global_transitions.filter(func(t: Transition): t.to != to)
+	global_transitions = global_transitions.filter(func(t: Transition): return t.to != to)
 	
 	var removed: bool = global_transitions.size() < original_size
 	if !removed: push_error("No Global Transition Was Found Between: %s -> %s" % [current_id, to])
@@ -603,7 +603,7 @@ func get_current_state_name() -> String:
 ## @return: State class, or null string if not found in enum
 func get_state_with_name(state_name: String) -> State:
 	var index: int = states_enum.keys().find(state_name)
-	return states[index] if states.has(index) else "Null"
+	return states[index] if index != -1 else "State with this name doesn't exist"
 
 ## Checks if a transition exists between two states.
 ##
@@ -611,7 +611,7 @@ func get_state_with_name(state_name: String) -> State:
 ## @param to: Target state ID
 ## @return: true if transition exists
 func has_transition(from: int, to: int) -> bool:
-	return transitions.has(from) && transitions[from].any(func(t: Transition): t.to == to)
+	return transitions.has(from) && transitions[from].any(func(t: Transition): return t.to == to)
 
 ## Checks if a state has any outgoing transitions.
 ##
@@ -625,7 +625,7 @@ func has_any_transition_from(from: int) -> bool:
 ## @param to: Target state ID
 ## @return: true if global transition exists
 func has_any_global_transition(to: int) -> bool:
-	return global_transitions.any(func(t): t.to == to)
+	return global_transitions.any(func(t): return t.to == to)
 
 ## Checks if there is a previous state stored.
 ##
@@ -735,7 +735,7 @@ class State:
 	## @param on_finished: Callable to execute when animation finishes
 	## @param speed: Animation playback speed multiplier
 	## @param blend: Blend time when transitioning to this animation
-	func set_animation_data(anim_name: String, loop: bool = false, on_finished = null, speed: float = 1, blend: float = 0) -> void:
+	func set_animation_data(anim_name: String, loop: bool = false, on_finished: Callable = Callable(), speed: float = 1, blend: float = 0) -> void:
 		var config: AnimationConfig = AnimationConfig.new(anim_name, speed, blend, loop, on_finished)
 		set_data("animation", config)
 	
@@ -752,6 +752,17 @@ class State:
 	## @return: Self for method chaining
 	func unlock() -> State:
 		lock_type = LockType.None
+		return self
+	
+	func set_minmum_time(value: float) -> State:
+		min_time = max(0.0, value)
+		return self
+	
+	func set_timeout(value: float) -> State:
+		if value <= 0:
+			push_warning("Can only set timeout to value which is greater than zero")
+			return self
+		timeout = value
 		return self
 	
 	## Sets which state to transition to on timeout.
@@ -1035,12 +1046,12 @@ class AnimationConfig:
 	## @param blend: Blend time
 	## @param anim_loop: Whether to loop
 	## @param _on_finished: Finish callback
-	func _init(name: String, anim_speed: float, blend: float, anim_loop: bool, _on_finished = null) -> void:
+	func _init(name: String, anim_speed: float, blend: float, anim_loop: bool, _on_finished: Callable = Callable()) -> void:
 		anim_name = name
 		speed = max(0.001, anim_speed)
 		custom_blend = max(0, blend)
 		loop = anim_loop
-		if _on_finished != null:
+		if _on_finished.is_valid():
 			on_finished = _on_finished
 		
 		if speed == 0.001:
