@@ -603,7 +603,7 @@ func get_current_state_name() -> String:
 ## @return: State class, or null string if not found in enum
 func get_state_with_name(state_name: String) -> State:
 	var index: int = states_enum.keys().find(state_name)
-	return states[index] if index != -1 else "State with this name doesn't exist"
+	return states[index] if index != -1 else null
 
 ## Checks if a transition exists between two states.
 ##
