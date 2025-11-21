@@ -371,6 +371,14 @@ class TweenBuilder:
 		_data.delay_on_start = value
 		return self
 	
+	func loops(value: int) -> TweenBuilder:
+		_data.loops = value
+		return self
+	
+	func parallel() -> TweenBuilder:
+		_data.parallel = true
+		return self
+	
 	func group(group_name: String) -> TweenBuilder:
 		_data.group = group_name
 		return self
@@ -399,6 +407,10 @@ class TweenBuilder:
 	# Convenience shortcuts
 	func smooth() -> TweenBuilder:
 		ease_in_out().transition(Tween.TRANS_SINE)
+		return self
+	
+	func sine() -> TweenBuilder:
+		transition(Tween.TRANS_SINE)
 		return self
 	
 	func bounce() -> TweenBuilder:
