@@ -739,6 +739,12 @@ class State:
 		var config: AnimationConfig = AnimationConfig.new(anim_name, speed, blend, loop, on_finished)
 		set_data("animation", config)
 	
+	func set_events(update_event: Callable = Callable(), enter_event: Callable = Callable(), exit_event: Callable = Callable()) -> State:
+		update = update_event
+		enter = enter_event
+		exit = exit_event
+		return self
+	
 	## Locks the state to prevent transitions.
 	##
 	## @param type: Type of lock (Full, Transition, or None)
